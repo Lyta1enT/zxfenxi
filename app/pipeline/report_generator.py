@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -452,7 +452,7 @@ def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
 
 def generate_report(fields: Dict[str, Any], report_type: str,
                     source_filename: str, output_dir: str = 'output',
-                    raw_text: str = '', layout_result: Optional[Dict] = None) -> str:
+                    raw_text: str = '') -> str:
     """生成 Excel 报表
 
     Args:
@@ -461,7 +461,6 @@ def generate_report(fields: Dict[str, Any], report_type: str,
         source_filename: 源文件名
         output_dir: 输出目录
         raw_text: 原始文本
-        layout_result: 版面分析结果（含表格数据）
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -578,64 +577,6 @@ def generate_report(fields: Dict[str, Any], report_type: str,
     raw_cell.value = raw_text or '（无原始文本）'
     raw_cell.alignment = Alignment(wrap_text=True, vertical='top')
     raw_cell.font = styles['body_font']
-
-    # 表格数据（来自版面分析）
-    if layout_result and layout_result.get('tables'):
-        table_sheet = wb.create_sheet('表格数据')
-        table_sheet.sheet_view.showGridLines = False
-        _set_table_widths(table_sheet, [10, 50, 10, 10, 60])
-
-        tbl_headers = ['表格#', '类型', '页', '行', '内容']
-        for idx, h in enumerate(tbl_headers, start=1):
-            cell = table_sheet.cell(row=1, column=idx, value=h)
-            cell.font = styles['header_font']
-            cell.fill = styles['header_fill']
-            cell.border = styles['border']
-            cell.alignment = styles['center']
-
-        row = 2
-        for ti, table in enumerate(layout_result.get('tables', [])):
-            cells = table.get('cells', [])
-            if not cells:
-                # 无 cells 时用 HTML 或原文本
-                html = table.get('html', '')
-                table_sheet.cell(row=row, column=1, value=ti + 1).font = styles['body_font']
-                table_sheet.cell(row=row, column=2, value='HTML').font = styles['body_font']
-                table_sheet.cell(row=row, column=5, value=html[:2000] if html else str(table)).font = styles['body_font']
-                for c in range(1, 6):
-                    table_sheet.cell(row=row, column=c).border = styles['border']
-                row += 1
-                continue
-
-            # 遍历表格的行列
-            for ri, cell_row in enumerate(cells):
-                if isinstance(cell_row, list):
-                    row_text = ' | '.join([
-                        str(c.get('text', '')) if isinstance(c, dict) else str(c)
-                        for c in cell_row
-                    ])
-                    row_type = 'table_header' if ri == 0 else 'table_data'
-                elif isinstance(cell_row, dict):
-                    row_text = str(cell_row.get('text', ''))
-                    row_type = 'table_cell'
-                else:
-                    row_text = str(cell_row)
-                    row_type = 'table_data'
-
-                table_sheet.cell(row=row, column=1, value=ti + 1).font = styles['body_font']
-                table_sheet.cell(row=row, column=2, value=row_type).font = styles['body_font']
-                table_sheet.cell(row=row, column=3, value=table.get('page', '')).font = styles['body_font']
-                table_sheet.cell(row=row, column=4, value=ri + 1).font = styles['body_font']
-                table_sheet.cell(row=row, column=5, value=row_text[:2000]).font = styles['body_font']
-                for c in range(1, 6):
-                    table_sheet.cell(row=row, column=c).border = styles['border']
-                    if row_type == 'table_header':
-                        table_sheet.cell(row=row, column=c).font = Font(
-                            name='Microsoft YaHei', size=10, bold=True)
-                row += 1
-
-            # 空一行分隔不同表格
-            row += 1
 
     wb.save(output_path)
     return output_path
