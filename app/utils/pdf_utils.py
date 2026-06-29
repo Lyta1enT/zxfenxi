@@ -1,14 +1,17 @@
-"""PDF 处理工具"""
-import io
+"""PDF 处理工具：从 PDF 中提取文本或转为图片供 OCR 使用"""
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 import fitz  # PyMuPDF
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """从 PDF 中直接提取文本"""
-    doc = fitz.open(pdf_path)
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise ValueError(f"无法打开 PDF 文件 {pdf_path}: {e}")
+
     texts = []
     for page in doc:
         texts.append(page.get_text())
@@ -18,19 +21,26 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
 def pdf_to_images(pdf_path: str, dpi: int = 200) -> List[str]:
     """将 PDF 每页转换为图片，返回图片路径列表
-    
+
     使用 PyMuPDF 进行转换，比 pdf2image 更快且无需 poppler
     """
-    doc = fitz.open(pdf_path)
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise ValueError(f"无法打开 PDF 文件 {pdf_path}: {e}")
+
     image_paths = []
     base_path = str(Path(pdf_path).with_suffix(""))
-    
+
     for page_num, page in enumerate(doc):
         pix = page.get_pixmap(dpi=dpi)
         img_path = f"{base_path}_page_{page_num + 1}.png"
-        pix.save(img_path)
+        try:
+            pix.save(img_path)
+        except Exception as e:
+            raise IOError(f"保存 PDF 页面图片失败 {img_path}: {e}")
         image_paths.append(img_path)
-    
+
     doc.close()
     return image_paths
 

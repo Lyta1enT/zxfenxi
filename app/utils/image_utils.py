@@ -1,9 +1,6 @@
-"""图片预处理工具"""
-from typing import List, Tuple, Optional
-
+"""图片预处理工具：为 OCR 提供图片预处理功能"""
 import cv2
 import numpy as np
-from PIL import Image
 
 
 def preprocess_image(image_path: str) -> np.ndarray:
@@ -25,7 +22,10 @@ def preprocess_image(image_path: str) -> np.ndarray:
 
 
 def deskew_image(image: np.ndarray) -> np.ndarray:
-    """矫正图片倾斜"""
+    """矫正图片倾斜（输入应为二值化后的图片）"""
+    if image is None or image.size == 0:
+        return image
+
     coords = np.column_stack(np.where(image > 0))
     if len(coords) == 0:
         return image
