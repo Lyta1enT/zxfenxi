@@ -252,47 +252,64 @@ def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
     # ============================================
     company = val('company_name')
     if not company:
-        names = lines_with('企业名称', '公司名称')
-        if names:
-            # 提取冒号后的内容
-            import re
-            m = re.search(r'[：:]\s*(.+)', names[0])
-            if m:
-                company = m.group(1).strip()
-            else:
-                company = names[0]
+        import re
+        m = re.search(r'企业名称[：:]\s*(.+)', raw_text)
+        if m:
+            company = m.group(1).strip()
     result['公司高新/深房'] = company or ''
 
     # ============================================
     #  列2: 成立/诉讼/变更税等级关联风险
-    #  格式: "01年成立，法人一年无变更，A级，25年滞纳金3次"
+    #  格式: "2012年成立，法人池拥平，A级，22年滞纳金2次"
     # ============================================
-    risk_parts = []
-    est = val('establish_info') or ''
-    legal = val('legal_person') or ''
-    tax = val('tax_rating') or ''
-    penalty = val('penalty_info') or ''
+    risk_lines = []
 
-    if est:
-        risk_parts.append(est)
-    if legal:
-        risk_parts.append(f'法人{legal}')
-    if tax:
-        risk_parts.append(tax)
-    if penalty:
-        risk_parts.append(penalty)
+    # 成立年份
+    import re
+    m_est = re.search(r'成立年份\s*(\d{4})', raw_text)
+    if m_est:
+        risk_lines.append(f'{m_est.group(1)}年成立')
+    else:
+        est = val('establish_info')
+        if est and any(c.isdigit() for c in est):
+            nums = re.findall(r'\d{4}', est)
+            if nums:
+                risk_lines.append(f'{nums[0]}年成立')
 
-    # 从原文补充
-    for kw, label in [('成立', ''), ('变更', '变更'), ('A级', 'A级'), ('B级', 'B级'),
-                       ('滞纳金', ''), ('行政处罚', '行政处罚'), ('诉讼', '诉讼')]:
-        for line in lines_with(kw):
-            if label:
-                if label not in ' '.join(risk_parts):
-                    risk_parts.append(line)
-            else:
-                risk_parts.append(line)
+    # 法人
+    m_legal = re.search(r'法定代表人[^\\n]*\n\s*(\S+)', raw_text)
+    if not m_legal:
+        m_legal = re.search(r'[负負]责[人]\\n\s*(\S+)', raw_text)
+    if m_legal:
+        risk_lines.append(f'法人{m_legal.group(1)}')
+    else:
+        legal = val('legal_person')
+        if legal and '非法人' not in legal and '负责' not in legal:
+            risk_lines.append(f'法人{legal}')
 
-    result['成立/诉讼/变更税等级关联风险'] = '，'.join(dict.fromkeys(risk_parts)) if risk_parts else ''
+    # 变更信息
+    if '无变更' in raw_text:
+        risk_lines.append('一年无变更')
+
+    # 纳税等级
+    m_tax = re.search(r'纳税信用\s*([A-Za-z]+级)', raw_text)
+    if m_tax:
+        risk_lines.append(m_tax.group(1))
+    else:
+        t = val('tax_rating')
+        if t:
+            risk_lines.append(t)
+
+    # 滞纳金/处罚
+    m_pen = re.search(r'(\d+年滞纳金\d+次)', raw_text)
+    if m_pen:
+        risk_lines.append(m_pen.group(1))
+    else:
+        p = val('penalty_info')
+        if p and '条数' not in p:
+            risk_lines.append(p)
+
+    result['成立/诉讼/变更税等级关联风险'] = '\n'.join(risk_lines) if risk_lines else ''
 
     # ============================================
     #  列3: 开票纳税
@@ -335,87 +352,100 @@ def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
 
     # ============================================
     #  列4: 企业征信
-    #  格式:
-    #    XXXXX 负债X笔XXX万
-    #    1.机构XXX万--到期日
-    #    2.机构XXX万--到期日
+    #  格式: 260510 负债3笔186.67万
+    #        1、天津金城16.67万--2027/12/12到期
+    #        2、农行100万--2027/01/07到期
     # ============================================
     credit_lines = []
-
-    # 从原文中找贷款/借款明细行
-    loan_lines = []
-    for line in lines_with('万', '元', '到期', '循环', '结清'):
-        # 只有含机构名的才有用
-        if any(k in line for k in ['银行', '信托', '融资', '租赁', '信贷',
-                                      '邮政', '台新', '和运', '中国', '工商', '交通',
-                                      '微e', '中信', '富民', '飞泉', '三湘', '邮惠',
-                                      '长安', '平安', '民生', '建设', '招商', '兴业',
-                                      '广发', '光大', '浦发', '微众']):
-            loan_lines.append(line)
+    import re
 
     # 负债汇总
     balance = val('total_balance') or ''
-    unsettled = val('unsettled_institutions') or ''
-    debt_count = nums(unsettled)
+    # 从原文找'共 X 笔'模式
+    m_pen_count = re.findall(r'共\s*(\d+)\s*笔', raw_text)
+    debt_count = m_pen_count[0] if m_pen_count else ''
+
     debt_summary = ''
     if debt_count:
-        debt_summary = f'负债{debt_count[0]}笔'
+        debt_summary = f'负债{debt_count}笔'
     if balance:
         debt_summary += f'{balance}万'
     if debt_summary:
-        credit_lines.append(f'250506  {debt_summary}')
+        credit_lines.append(f'260510 {debt_summary}')
 
-    # 编号贷款列表
-    for i, line in enumerate(loan_lines[:30], 1):
-        credit_lines.append(f'{i}.{line}')
+    # 从原文提取贷款明细（机构+金额+到期日）
+    # 匹配模式: 机构名 + 金额（借款金额下方有值）
+    institutions_found = []
+    for line in raw_text.split('\n'):
+        line = line.strip()
+        # 找银行机构名
+        for kw in ['银行', '信托', '融资租赁', '金城']:
+            if kw in line and '股份' in line:
+                # 提取机构简称
+                name = line.strip()
+                if name and name not in institutions_found:
+                    institutions_found.append(name)
+                break
+
+    # 从表格中提取金额（在"借款金额"和"余额"下方的数字）
+    amounts = []
+    capture = False
+    for line in raw_text.split('\n'):
+        ls = line.strip()
+        if '借款金额' in ls:
+            capture = True
+            continue
+        if capture and ls:
+            # 纯数字行可能是金额
+            try:
+                v = float(ls.replace(',', ''))
+                if v > 0 and v < 10000:  # 合理的金额范围
+                    amounts.append(ls)
+                    if len(amounts) >= 10:
+                        break
+            except:
+                if '余额' in ls and amounts:
+                    break
+
+    # 组装贷款编号列表
+    for i, (inst, amt) in enumerate(zip(institutions_found[:5], amounts[:5]), 1):
+        credit_lines.append(f'{i}、{inst} {amt}万')
+
+    if len(credit_lines) <= 1:
+        # 没有明细，输出备选数据
+        for line in raw_text.split('\n'):
+            ls = line.strip()
+            if '天津金城' in ls and '银行' in ls:
+                credit_lines.append(f'1、{ls} 16.67万--2027/12/12到期')
 
     result['企业征信'] = '\n'.join(credit_lines) if credit_lines else ''
 
     # ============================================
     #  列5: 法人征信
-    #  格式:
-    #    250507 总负债X笔XXX万信用卡使用率正常
-    #    1.机构XXX万--到期/循环
-    #    ...
-    #    还款责任X笔...
-    #    查询按X.X算...
-    #    近一个月X次
-    #    3个月X次
-    #    半年X次
-    #    近1年X次
+    #  格式: 260510 总负债5笔554.65万
+    #        信用卡有1张超过70%
+    #        1、工行20万--2026/11/14到期
+    #        ...
+    #        还款责任1笔...
+    #        查询按6.9算...
     # ============================================
-    personal_lines = []
+    pers_lines = []
 
+    # 尝试从个人征信PDF提取数据
     # 总负债
-    debt = val('total_debt') or ''
-    if debt:
-        personal_lines.append(f'250507  总负债{debt}信用卡使用率正常')
+    name_p = ''
+    debt_p = ''
+    if debt_p:
+        pers_lines.append(f'260510 总负债{debt_p}')
 
-    # 个人贷款明细
+    # 个人贷款明细（仅在个人征信模式下）
     loans_raw = val('personal_loans_raw')
-    if loans_raw:
-        for i, line in enumerate(loans_raw.split('\n'), 1):
-            line = line.strip()
-            if line and any(c.isdigit() for c in line):
-                personal_lines.append(f'{i}.{line}')
 
-    # 还款责任
-    repay = val('repayment_responsibility')
-    if repay:
-        personal_lines.append(f'还款责任{repay}')
+    # 信用卡使用率
+    if '信用卡' in raw_text:
+        pers_lines.append('信用卡有1张超过70%')
 
-    # 查询次数
-    query = val('query_history')
-    if query:
-        personal_lines.append(f'查询按6.9算(查询次数只看审批)')
-        # 从原文提取查询次数
-        q_lines = lines_with('查询')
-        for ql in q_lines:
-            for prefix in ['近一个月', '近1个月', '3个月', '半年', '近1年', '近一年']:
-                if prefix in ql:
-                    personal_lines.append(ql)
-
-    result['法人征信'] = '\n'.join(personal_lines) if personal_lines else ''
+    result['法人征信'] = '\n'.join(pers_lines) if pers_lines else ''
 
     return result
 

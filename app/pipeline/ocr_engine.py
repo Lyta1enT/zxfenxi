@@ -28,7 +28,6 @@ class OCREngine:
                 lang=self.lang,
                 ocr_version=self.ocr_version,
                 use_angle_cls=self.use_angle_cls,
-                show_log=False,
             )
             self._initialized = True
     
