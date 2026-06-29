@@ -79,6 +79,9 @@ class BaseExtractor(ABC):
                                    '代码', '状态', '名称', '类型', '方式'}
                     if (not context or context in LABEL_WORDS) and i + 1 < len(ocr_items):
                         context = ocr_items[i + 1]['text'].strip().lstrip('：:，,。.、')
+                    # 值太长(>80)且不含数字 → 过滤掉
+                    if len(context) > 80 and not any(c.isdigit() for c in context):
+                        continue
                     matched.append({
                         'value': context,
                         'confidence': item['confidence'],
@@ -139,8 +142,12 @@ class BaseExtractor(ABC):
     def _make_field(self, matches):
         if matches and matches[0].get('value', '').strip():
             m = matches[0]
+            val = m['value'].strip()
+            # 值太长（>80）且不含数字 → 大概率是废话
+            if len(val) > 80 and not any(c.isdigit() for c in val):
+                return {'value': '', 'confidence': 0, 'page': 0, 'note': '过滤(废话)'}
             return {
-                'value': m['value'],
+                'value': val,
                 'confidence': m['confidence'],
                 'page': m['page'],
                 'note': ''
@@ -154,8 +161,28 @@ class BaseExtractor(ABC):
 
     def _make_text_field(self, text: str, confidence: float = 1.0,
                          page: int = 0, note: str = ''):
+        # 清理：去掉每行中的报告说明碎片
+        clean_lines = []
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            # 跳过包含 boilerplate 关键词的行
+            skip_words = ['本报告', '如无特别', '信息主体', '征信中心',
+                         '常见的产品', '是指除', '五级分类', '逾期总额',
+                         '资产管理公司', '担保交易指', '第三人实质上']
+            if any(kw in line for kw in skip_words):
+                continue
+            # 只保留含数字或机构名的行
+            if any(c.isdigit() for c in line) or any(k in line for k in ['银行', '公司', '融资']):
+                clean_lines.append(line)
+        text = '\n'.join(clean_lines)
+        
+        # 过滤后没有内容则返回未识别
+        if not text.strip():
+            return {'value': '', 'confidence': 0, 'page': 0, 'note': '未识别'}
         return {
-            'value': text,
+            'value': text[:500],
             'confidence': confidence,
             'page': page,
             'note': note,

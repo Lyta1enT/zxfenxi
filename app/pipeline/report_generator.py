@@ -136,51 +136,75 @@ def _is_boilerplate(line: str) -> bool:
     return any(kw in line for kw in BOILERPLATE_FILTER)
 
 
+def _looks_like_data(line: str) -> bool:
+    """判断一行文本看起来像是具体数据（而不是标签或碎片）"""
+    # 包含数字 → 大概率是数据
+    if any(c.isdigit() for c in line):
+        return True
+    # 包含金额单位
+    if any(unit in line for unit in ['万', '元', '%']):
+        return True
+    # 包含日期
+    if any(d in line for d in ['年', '月', '日', '-']) and any(c.isdigit() for c in line):
+        return True
+    # 包含机构/人名特征
+    if any(kw in line for kw in ['有限公司', '银行', '股份', '保险', '融资', '信贷']):
+        return True
+    # 较短的纯标签行（<=8个字且无数字）→ 不是数据
+    if len(line) <= 8:
+        return False
+    # 纯中文无数字的长句 → 可能是说明文字
+    if len(line) > 15 and not any(c.isdigit() for c in line):
+        return False
+    return True
+
+
 def _classify_line(line: str) -> str:
     """根据内容将一行文本分到对应的列
     
-    Returns: col_name or None
+    只有看起来像数据的行才会被分类。
     """
-    # 列1: 公司名
-    if any(kw in line for kw in ['企业名称', '公司名称', '单位名称']):
+    if not _looks_like_data(line):
+        return None
+    
+    # 列1: 公司名（只有真正的企业名称字段才放这里）
+    if any(kw in line for kw in ['企业名称', '公司名称']) and \
+       any(c.isdigit() for c in line.replace('企业名称', '').replace('公司名称', '')):
         return '公司高新/深房'
+    # 纯公司名（不含银行/金融等字样）
+    if ('有限公司' in line or '科技' in line) and \
+       not any(k in line for k in ['银行', '股份', '保险', '信贷', '金融', '信托', '租赁', '小额贷款']):
+        if len(line) <= 30:  # 公司名通常不长
+            return '公司高新/深房'
     
-    # 列2: 成立/诉讼/变更/税务/处罚
-    if any(kw in line for kw in [
-        '成立', '法人', '变更', '纳税', '税务', 'A级', 'B级', 'M级',
-        '滞纳金', '处罚', '罚款', '诉讼', '法院', '行政处罚',
-        '经营异常', '违约', '欠税',
-        '注册资本', '出资', '经济类型', '企业规模', '所属行业',
-        '存续状态', '登记地址',
-    ]):
-        return '成立/诉讼/变更税等级关联风险'
+    # 列2: 成立/诉讼/变更/税务/处罚（必须有数字或具体值）
+    if any(kw in line for kw in ['成立', '法人', '变更', '纳税', '税务', 'A级', 'B级', 'M级',
+                                   '滞纳金', '处罚', '罚款', '诉讼', '法院', '行政处罚',
+                                   '注册资本', '出资', '经济类型', '企业规模', '所属行业',
+                                   '存续状态', '登记地址', '欠税']):
+        if any(c.isdigit() for c in line) or any(kw in line for kw in ['级', '万', '元']):
+            return '成立/诉讼/变更税等级关联风险'
     
-    # 列3: 开票纳税
-    if any(kw in line for kw in [
-        '开票', '发票', '销售收入', '销售额', '纳税', '缴税', '税款',
-    ]):
-        return '开票纳税'
+    # 列3: 开票纳税（必须有数字）
+    if any(kw in line for kw in ['开票', '发票', '销售收入', '销售额']):
+        if any(c.isdigit() for c in line):
+            return '开票纳税'
     
-    # 列4: 企业征信/贷款信息
-    if any(kw in line for kw in [
-        '贷款', '借款', '余额', '授信', '担保', '抵押', '质押',
-        '短期', '中长期', '未结清', '已结清', '信贷',
-        '账户数', '余额', '到期', '循环', '万元',
-        '发放形式', '担保方式', '开立日期', '到期日',
-        '五级分类', '逾期总额', '逾期本金',
-        '还款', '正常类', '关注类', '不良类',
-        '授信机构', '业务种类', '借款金额',
-    ]):
-        return '企业征信'
+    # 列4: 企业征信/贷款信息（必须有数据特征）
+    if any(kw in line for kw in ['贷款', '借款', '余额', '授信', '担保', '抵押', '质押',
+                                   '短期', '中长期', '未结清', '已结清', '信贷',
+                                   '账户数', '到期', '循环', '万元',
+                                   '还款', '正常类', '关注类', '不良类',
+                                   '授信机构', '业务种类', '借款金额',
+                                   '流动资金', '历史表现']):
+        if any(c.isdigit() for c in line) or any(kw in line for kw in ['万', '元', '银行', '保险', '融资']):
+            return '企业征信'
     
-    # 列5: 法人征信
-    if any(kw in line for kw in [
-        '姓名', '证件号码', '身份证', '性别', '出生',
-        '信用卡', '贷记卡', '负债', '逾期', '查询',
-        '还款责任', '担保责任', '共同还款',
-        '额度', '使用率', '已用额度',
-    ]):
-        return '法人征信'
+    # 列5: 法人征信（必须有个人数据特征）
+    if any(kw in line for kw in ['姓名', '身份证', '信用卡', '贷记卡', '负债',
+                                   '逾期', '查询', '额度', '使用率', '还款责任']):
+        if any(c.isdigit() for c in line) and len(line) > 5:
+            return '法人征信'
     
     return None
 
@@ -214,13 +238,17 @@ def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
     for line in all_lines:
         if _is_boilerplate(line):
             continue
-        # 过短的碎片行（1-2个字）跳过
-        if len(line) <= 2:
+    # 过短的碎片行（1-2个字）跳过
+    if len(line) <= 2:
+        continue
+    # 纯数字/符号行跳过
+    if line.strip().strip('-—=~').isdigit():
+        continue
+    # 以碎片开头的行（缺字、半截词）跳过
+    if line.startswith('度') or line.startswith('额') or line.startswith('用'):
+        if len(line) < 20:  # 短碎片多半是 OCR 切割错误
             continue
-        # 纯数字/符号行跳过
-        if line.strip().strip('-—=~').isdigit():
-            continue
-        col = _classify_line(line)
+    col = _classify_line(line)
         if col:
             if line not in result[col]:  # 去重
                 result[col].append(line)
