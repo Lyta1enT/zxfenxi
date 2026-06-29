@@ -1,6 +1,7 @@
-"""后台工作线程 - 在 QThread 中执行处理管道"""
+"""后台工作线程 - 支持多文件批量处理"""
 import traceback
-from typing import List, Dict, Any, Optional
+from pathlib import Path
+from typing import List, Dict, Any
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -12,74 +13,104 @@ from app.pipeline.report_generator import generate_report
 
 class ProcessingSignals(QThread):
     """工作线程信号"""
-    progress = pyqtSignal(int, str)       # (进度百分比, 状态描述)
+    progress = pyqtSignal(int, str)       # (整体进度百分比, 状态描述)
+    file_progress = pyqtSignal(int, int, str)  # (当前文件索引, 总文件数, 文件名)
     log = pyqtSignal(str, str)            # (级别, 消息)
-    result_ready = pyqtSignal(dict)       # 抽取结果就绪
-    report_ready = pyqtSignal(str)        # 报告文件路径
-    error = pyqtSignal(str)               # 错误信息
-    finished = pyqtSignal()               # 全部完成
+    result_ready = pyqtSignal(int, dict)  # (文件索引, 抽取结果)
+    report_ready = pyqtSignal(int, str)   # (文件索引, 报告路径)
+    all_done = pyqtSignal(list)           # 全部完成，发送报告路径列表
+    error = pyqtSignal(int, str)          # (文件索引, 错误信息)
 
 
 class ProcessingWorker(QThread):
-    """文件处理工作线程"""
+    """多文件批量处理工作线程"""
 
-    def __init__(self, file_path: str, report_type: str, parent=None):
+    def __init__(self, file_paths: List[str], report_type: str, parent=None):
         super().__init__(parent)
-        self.file_path = file_path
+        self.file_paths = file_paths
         self.report_type = report_type
         self.signals = ProcessingSignals()
         self._ocr_engine = OCREngine()
 
     def run(self):
-        try:
-            # Step 1: 文件处理
-            self.signals.progress.emit(5, '正在分析文件...')
-            self.signals.log.emit('INFO', f'开始处理文件: {self.file_path}')
+        """依次处理所有文件"""
+        total = len(self.file_paths)
+        report_paths = []
 
-            file_result = process_file(self.file_path)
-            file_type = file_result['file_type']
-            image_paths = file_result['image_paths']
-            raw_text = file_result['text']
+        for idx, file_path in enumerate(self.file_paths):
+            filename = Path(file_path).name
+            self.signals.file_progress.emit(idx, total, filename)
 
-            self.signals.log.emit('INFO', f'文件类型: {file_type}, 图片页数: {len(image_paths)}')
+            try:
+                self._process_single_file(idx, file_path, total, report_paths)
+            except Exception as e:
+                error_msg = f'[{filename}] 处理失败: {str(e)}'
+                self.signals.log.emit('ERROR', error_msg)
+                self.signals.error.emit(idx, str(e))
+                # 继续处理下一个文件，不中断整个流程
 
-            # Step 2: OCR 识别
-            self.signals.progress.emit(20, '正在进行 OCR 识别...')
-            self.signals.log.emit('INFO', f'启动 OCR 识别 ({len(image_paths)} 页)...')
+        # 全部完成
+        self.signals.all_done.emit(report_paths)
+        self.signals.progress.emit(100, f'全部完成 ({len(report_paths)}/{total} 成功)')
 
-            ocr_items = []
-            if image_paths:
-                ocr_items = self._ocr_engine.recognize_batch(image_paths)
-                self.signals.log.emit('INFO', f'OCR 识别完成，共 {len(ocr_items)} 个文本块')
-            elif raw_text:
-                self.signals.log.emit('INFO', f'文件已有文本内容 ({len(raw_text)} 字符)，跳过 OCR')
+    def _process_single_file(self, idx: int, file_path: str,
+                             total: int, report_paths: List[str]):
+        """处理单个文件"""
+        filename = Path(file_path).name
+        file_num = idx + 1
 
-            self.signals.progress.emit(60, '正在抽取字段...')
+        # 当前文件的进度范围: [idx*100/total, (idx+1)*100/total)
+        base_progress = int(idx * 100 / total)
 
-            # Step 3: 字段抽取
-            fields = extract_fields(self.report_type, ocr_items, raw_text)
-            field_defs = get_field_definitions(self.report_type)
+        def emit_progress(sub_pct: int, msg: str):
+            pct = min(base_progress + int(sub_pct / total), 99)
+            self.signals.progress.emit(pct, f'[{file_num}/{total}] {msg}')
 
-            hit_count = sum(1 for f in field_defs if fields.get(f['key'], {}).get('value', ''))
-            total = len(field_defs)
-            self.signals.log.emit('INFO', f'字段抽取完成: {hit_count}/{total} 字段命中')
+        # Step 1: 文件处理
+        emit_progress(0, f'分析文件: {filename}')
+        self.signals.log.emit('INFO', f'[{file_num}/{total}] 处理文件: {filename}')
 
-            self.signals.result_ready.emit(fields)
-            self.signals.progress.emit(80, '正在生成 Word 报告...')
+        file_result = process_file(file_path)
+        file_type = file_result['file_type']
+        image_paths = file_result['image_paths']
+        raw_text = file_result['text']
 
-            # Step 4: 生成报告
-            output_path = generate_report(
-                fields=fields,
-                report_type=self.report_type,
-                source_filename=self.file_path,
-            )
+        self.signals.log.emit('INFO',
+            f'[{file_num}/{total}] 类型: {file_type}, 图片页数: {len(image_paths)}')
 
-            self.signals.log.emit('SUCCESS', f'Word 报告已生成: {output_path}')
-            self.signals.report_ready.emit(output_path)
-            self.signals.progress.emit(100, '处理完成')
-            self.signals.finished.emit()
+        # Step 2: OCR 识别
+        emit_progress(20, f'OCR 识别: {filename}')
 
-        except Exception as e:
-            error_msg = f'处理失败: {str(e)}\n{traceback.format_exc()}'
-            self.signals.log.emit('ERROR', error_msg)
-            self.signals.error.emit(str(e))
+        ocr_items = []
+        if image_paths:
+            ocr_items = self._ocr_engine.recognize_batch(image_paths)
+            self.signals.log.emit('INFO',
+                f'[{file_num}/{total}] OCR 完成: {len(ocr_items)} 个文本块')
+        elif raw_text:
+            self.signals.log.emit('INFO',
+                f'[{file_num}/{total}] 跳过 OCR (已有文本 {len(raw_text)} 字符)')
+
+        # Step 3: 字段抽取
+        emit_progress(60, f'字段抽取: {filename}')
+        fields = extract_fields(self.report_type, ocr_items, raw_text)
+        field_defs = get_field_definitions(self.report_type)
+
+        hit = sum(1 for f in field_defs if fields.get(f['key'], {}).get('value', ''))
+        total_fields = len(field_defs)
+        self.signals.log.emit('INFO',
+            f'[{file_num}/{total}] 字段抽取: {hit}/{total_fields} 命中')
+
+        self.signals.result_ready.emit(idx, fields)
+
+        # Step 4: 报告生成
+        emit_progress(80, f'生成报告: {filename}')
+        output_path = generate_report(
+            fields=fields,
+            report_type=self.report_type,
+            source_filename=file_path,
+        )
+
+        self.signals.log.emit('SUCCESS',
+            f'[{file_num}/{total}] 报告已生成: {output_path}')
+        self.signals.report_ready.emit(idx, output_path)
+        report_paths.append(output_path)
