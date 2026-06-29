@@ -211,55 +211,213 @@ def _classify_line(line: str) -> str:
 
 def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
                             raw_text: str = '') -> Dict[str, Any]:
-    """将OCR原始文本按关键词分到5列，过滤报告说明"""
-    result = {h: [] for h in SUMMARY_HEADERS}
-    
-    # 从 raw_text 和 fields 中收集所有文本行
-    all_lines = []
-    
-    # 从 raw_text 分行
-    if raw_text:
-        for line in raw_text.replace('\\n', '\n').split('\n'):
+    """按用户指定的格式输出5列汇总数据
+
+    列1: 公司名称
+    列2: 成立/法人/税务/处罚概要（一行）
+    列3: 按年开票纳税（一年一行）
+    列4: 企业征信（负债汇总 + 编号贷款明细）
+    列5: 法人征信（个人负债 + 编号明细 + 还款责任 + 查询明细）
+    """
+    result = {h: '' for h in SUMMARY_HEADERS}
+    raw_text = raw_text or ''
+
+    # ==== 辅助函数：从字段或原文中取值 ====
+    def val(key):
+        d = fields.get(key, {})
+        if isinstance(d, dict):
+            return (d.get('value', '') or '').strip()
+        return str(d).strip()
+
+    def lines_with(*kws):
+        """从 raw_text 中找包含任一关键词的行（去重、过滤废话）"""
+        found = []
+        for line in raw_text.split('\n'):
             line = line.strip()
-            if line:
-                all_lines.append(line)
-    
-    # 从 field values 中补充
-    if fields:
-        for key, data in fields.items():
-            val = data.get('value', '') if isinstance(data, dict) else str(data)
-            if val and val not in all_lines:
-                for line in val.replace('\\n', '\n').split('\n'):
-                    line = line.strip()
-                    if line and line not in all_lines:
-                        all_lines.append(line)
-    
-    # 过滤报告说明 + 分桶
-    for line in all_lines:
-        if _is_boilerplate(line):
-            continue
-    # 过短的碎片行（1-2个字）跳过
-    if len(line) <= 2:
-        continue
-    # 纯数字/符号行跳过
-    if line.strip().strip('-—=~').isdigit():
-        continue
-    # 以碎片开头的行（缺字、半截词）跳过
-    if line.startswith('度') or line.startswith('额') or line.startswith('用'):
-        if len(line) < 20:  # 短碎片多半是 OCR 切割错误
-            continue
-    col = _classify_line(line)
-        if col:
-            if line not in result[col]:  # 去重
-                result[col].append(line)
-    
-    # 列1特殊处理：如果有企业名称字段直接用它
-    company = _pick_first(fields, ['company_name'])
-    if company:
-        result['公司高新/深房'] = [company]
-    
-    # 将列表合并为换行分隔的文本
-    return {k: '\n'.join(v) for k, v in result.items()}
+            if not line:
+                continue
+            if _is_boilerplate(line):
+                continue
+            if any(kw in line for kw in kws):
+                if line not in found:
+                    found.append(line)
+        return found
+
+    def nums(s):
+        import re
+        return re.findall(r'[\d.]+', s)
+
+    # ============================================
+    #  列1: 公司名称
+    # ============================================
+    company = val('company_name')
+    if not company:
+        names = lines_with('企业名称', '公司名称')
+        if names:
+            # 提取冒号后的内容
+            import re
+            m = re.search(r'[：:]\s*(.+)', names[0])
+            if m:
+                company = m.group(1).strip()
+            else:
+                company = names[0]
+    result['公司高新/深房'] = company or ''
+
+    # ============================================
+    #  列2: 成立/诉讼/变更税等级关联风险
+    #  格式: "01年成立，法人一年无变更，A级，25年滞纳金3次"
+    # ============================================
+    risk_parts = []
+    est = val('establish_info') or ''
+    legal = val('legal_person') or ''
+    tax = val('tax_rating') or ''
+    penalty = val('penalty_info') or ''
+
+    if est:
+        risk_parts.append(est)
+    if legal:
+        risk_parts.append(f'法人{legal}')
+    if tax:
+        risk_parts.append(tax)
+    if penalty:
+        risk_parts.append(penalty)
+
+    # 从原文补充
+    for kw, label in [('成立', ''), ('变更', '变更'), ('A级', 'A级'), ('B级', 'B级'),
+                       ('滞纳金', ''), ('行政处罚', '行政处罚'), ('诉讼', '诉讼')]:
+        for line in lines_with(kw):
+            if label:
+                if label not in ' '.join(risk_parts):
+                    risk_parts.append(line)
+            else:
+                risk_parts.append(line)
+
+    result['成立/诉讼/变更税等级关联风险'] = '，'.join(dict.fromkeys(risk_parts)) if risk_parts else ''
+
+    # ============================================
+    #  列3: 开票纳税
+    #  格式: "23年开票7709万，纳税163万"（一年一行）
+    # ============================================
+    invoice_lines = []
+    for line in lines_with('开票', '销售收入', '销售额', '纳税', '缴税'):
+        if any(c.isdigit() for c in line):
+            invoice_lines.append(line)
+
+    # 尝试按年组装
+    import re
+    year_data = {}
+    for line in raw_text.split('\n'):
+        # 匹配 "23年开票7709万，纳税163万"
+        m = re.search(r'(?:20)?(\d{2})\s*年\s*开票\s*([\d,.]+\s*万)', line)
+        if m:
+            yr = m.group(1)
+            inv = m.group(2)
+            year_data.setdefault(yr, {})
+            year_data[yr]['invoice'] = inv
+        m2 = re.search(r'(?:20)?(\d{2})\s*年\s*纳税\s*([\d,.]+\s*万)', line)
+        if m2:
+            yr = m2.group(1)
+            tax_v = m2.group(2)
+            year_data.setdefault(yr, {})
+            year_data[yr]['tax'] = tax_v
+
+    if year_data:
+        invoice_lines = []
+        for yr in sorted(year_data.keys()):
+            parts = [f'{yr}年']
+            if 'invoice' in year_data[yr]:
+                parts.append(f'开票{year_data[yr]["invoice"]}')
+            if 'tax' in year_data[yr]:
+                parts.append(f'纳税{year_data[yr]["tax"]}')
+            invoice_lines.append('，'.join(parts))
+
+    result['开票纳税'] = '\n'.join(invoice_lines) if invoice_lines else ''
+
+    # ============================================
+    #  列4: 企业征信
+    #  格式:
+    #    XXXXX 负债X笔XXX万
+    #    1.机构XXX万--到期日
+    #    2.机构XXX万--到期日
+    # ============================================
+    credit_lines = []
+
+    # 从原文中找贷款/借款明细行
+    loan_lines = []
+    for line in lines_with('万', '元', '到期', '循环', '结清'):
+        # 只有含机构名的才有用
+        if any(k in line for k in ['银行', '信托', '融资', '租赁', '信贷',
+                                      '邮政', '台新', '和运', '中国', '工商', '交通',
+                                      '微e', '中信', '富民', '飞泉', '三湘', '邮惠',
+                                      '长安', '平安', '民生', '建设', '招商', '兴业',
+                                      '广发', '光大', '浦发', '微众']):
+            loan_lines.append(line)
+
+    # 负债汇总
+    balance = val('total_balance') or ''
+    unsettled = val('unsettled_institutions') or ''
+    debt_count = nums(unsettled)
+    debt_summary = ''
+    if debt_count:
+        debt_summary = f'负债{debt_count[0]}笔'
+    if balance:
+        debt_summary += f'{balance}万'
+    if debt_summary:
+        credit_lines.append(f'250506  {debt_summary}')
+
+    # 编号贷款列表
+    for i, line in enumerate(loan_lines[:30], 1):
+        credit_lines.append(f'{i}.{line}')
+
+    result['企业征信'] = '\n'.join(credit_lines) if credit_lines else ''
+
+    # ============================================
+    #  列5: 法人征信
+    #  格式:
+    #    250507 总负债X笔XXX万信用卡使用率正常
+    #    1.机构XXX万--到期/循环
+    #    ...
+    #    还款责任X笔...
+    #    查询按X.X算...
+    #    近一个月X次
+    #    3个月X次
+    #    半年X次
+    #    近1年X次
+    # ============================================
+    personal_lines = []
+
+    # 总负债
+    debt = val('total_debt') or ''
+    if debt:
+        personal_lines.append(f'250507  总负债{debt}信用卡使用率正常')
+
+    # 个人贷款明细
+    loans_raw = val('personal_loans_raw')
+    if loans_raw:
+        for i, line in enumerate(loans_raw.split('\n'), 1):
+            line = line.strip()
+            if line and any(c.isdigit() for c in line):
+                personal_lines.append(f'{i}.{line}')
+
+    # 还款责任
+    repay = val('repayment_responsibility')
+    if repay:
+        personal_lines.append(f'还款责任{repay}')
+
+    # 查询次数
+    query = val('query_history')
+    if query:
+        personal_lines.append(f'查询按6.9算(查询次数只看审批)')
+        # 从原文提取查询次数
+        q_lines = lines_with('查询')
+        for ql in q_lines:
+            for prefix in ['近一个月', '近1个月', '3个月', '半年', '近1年', '近一年']:
+                if prefix in ql:
+                    personal_lines.append(ql)
+
+    result['法人征信'] = '\n'.join(personal_lines) if personal_lines else ''
+
+    return result
 
 
 def generate_report(fields: Dict[str, Any], report_type: str,
