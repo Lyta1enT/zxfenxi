@@ -16,12 +16,17 @@ REPORT_TYPE_NAMES = {
 }
 
 
-SUMMARY_HEADERS = [
-    '公司高新/深房',
-    '成立/诉讼/变更税等级关联风险',
-    '开票纳税',
-    '企业征信',
-    '法人征信',
+CLIENT_HEADERS = [
+    '公司\n高新/深房\n双签',
+    '地址',
+    '成立/诉讼/变更税等级\n关联风险',
+    '产品\n社保人数锐减\n场地、设备库存',
+    '开票纳税\n是否增量',
+    '企业征信（日期）\n（增加授信有额度的）',
+    '法人征信（日期）',
+    '法人配偶征信（日期）',
+    '上下游（国央企上市公司、深圳高新以上记录）',
+    '备注',
 ]
 
 
@@ -471,35 +476,46 @@ def generate_report(fields: Dict[str, Any], report_type: str,
     wb = Workbook()
     styles = _create_styles()
 
-    # 总表
+    # ====== 总表（10列客户格式） ======
     ws = wb.active
     ws.title = '总表'
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = 'A2'
-    _set_table_widths(ws, [18, 28, 22, 36, 36])
+    
+    col_widths = [36, 40, 28, 28, 32, 40, 40, 32, 44, 15]
+    for idx, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(idx)].width = w
 
-    ws.merge_cells('A1:E1')
-    c = ws['A1']
-    c.value = f"{REPORT_TYPE_NAMES.get(report_type, '征信报告')} - 结构化总表"
-    c.font = styles['title_font']
-    c.alignment = styles['center']
-
-    for idx, header in enumerate(SUMMARY_HEADERS, start=1):
-        cell = ws.cell(row=2, column=idx, value=header)
+    for idx, h in enumerate(CLIENT_HEADERS, 1):
+        cell = ws.cell(row=1, column=idx, value=h)
         cell.font = styles['header_font']
         cell.fill = styles['header_fill']
         cell.border = styles['border']
-        cell.alignment = styles['center']
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    summary = _collect_summary_fields(report_type, fields, raw_text)
-    row_values = [summary.get(h, '') for h in SUMMARY_HEADERS]
-    for idx, value in enumerate(row_values, start=1):
-        cell = ws.cell(row=3, column=idx, value=value or '未识别')
+    # 数据行（10列）
+    company = _pick_first(fields, ['company_name'])
+    hightech = '高新' if '高新' in raw_text else ''
+    col1 = (company or '') + ('\n' + hightech if hightech else '')
+    
+    col_data = [
+        col1,                               # 列1: 公司/高新/双签
+        '',                                  # 列2: 地址
+        _pick_first(fields, ['establish_info', 'legal_person', 'tax_rating']),  # 列3: 成立/诉讼
+        '',                                  # 列4: 产品/社保
+        '',                                  # 列5: 开票纳税
+        '',                                  # 列6: 企业征信
+        '',                                  # 列7: 法人征信
+        '',                                  # 列8: 法人配偶
+        '',                                  # 列9: 上下游
+        '',                                  # 列10: 备注
+    ]
+    
+    for idx, val in enumerate(col_data, 1):
+        cell = ws.cell(row=2, column=idx, value=val or '')
         cell.font = styles['body_font']
         cell.border = styles['border']
-        cell.alignment = styles['left'] if idx in (1, 2, 4, 5) else styles['center']
-        if not value:
-            cell.fill = styles['warn_fill']
+        cell.alignment = Alignment(wrap_text=True, vertical='top')
 
     # 字段明细
     detail = wb.create_sheet('字段明细')
