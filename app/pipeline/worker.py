@@ -1,7 +1,8 @@
-"""后台工作线程 - 支持多文件批量处理"""
+"""后台工作线程 - 多文件合并为1份报告"""
 import traceback
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -13,17 +14,60 @@ from app.pipeline.report_generator import generate_report
 
 class ProcessingSignals(QThread):
     """工作线程信号"""
-    progress = pyqtSignal(int, str)       # (整体进度百分比, 状态描述)
+    progress = pyqtSignal(int, str)       # (进度百分比, 状态描述)
     file_progress = pyqtSignal(int, int, str)  # (当前文件索引, 总文件数, 文件名)
     log = pyqtSignal(str, str)            # (级别, 消息)
-    result_ready = pyqtSignal(int, dict)  # (文件索引, 抽取结果)
-    report_ready = pyqtSignal(int, str)   # (文件索引, 报告路径)
-    all_done = pyqtSignal(list)           # 全部完成，发送报告路径列表
+    all_done = pyqtSignal(str, object) # (报告路径, 源文件名列表)
     error = pyqtSignal(int, str)          # (文件索引, 错误信息)
 
 
+def _merge_fields(all_fields: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """合并多个文件提取的字段，优先取非空值"""
+    merged = {}
+    for fields in all_fields:
+        for key, data in fields.items():
+            if key not in merged:
+                merged[key] = data
+            else:
+                # 已有值但为空，用新值覆盖
+                existing = merged[key]
+                if isinstance(existing, dict) and isinstance(data, dict):
+                    if not existing.get('value', '') and data.get('value', ''):
+                        merged[key] = data
+                    elif existing.get('value', '') and not data.get('value', ''):
+                        pass  # 保留现有
+                    elif data.get('value', ''):
+                        # 都有值，追加（用换行分隔）
+                        existing_val = existing.get('value', '')
+                        new_val = data.get('value', '')
+                        if new_val not in existing_val:
+                            merged[key] = {
+                                'value': existing_val + '\n' + new_val,
+                                'confidence': max(
+                                    existing.get('confidence', 0),
+                                    data.get('confidence', 0)
+                                ),
+                                'page': existing.get('page', 0),
+                                'note': '多源合并',
+                            }
+    return merged
+
+
+def _merge_text(all_texts: List[str]) -> str:
+    """合并多个文件的原始文本"""
+    seen = set()
+    merged = []
+    for text in all_texts:
+        for line in text.split('\n'):
+            line = line.strip()
+            if line and line not in seen:
+                seen.add(line)
+                merged.append(line)
+    return '\n'.join(merged)
+
+
 class ProcessingWorker(QThread):
-    """多文件批量处理工作线程"""
+    """多文件合并处理工作线程"""
 
     def __init__(self, file_paths: List[str], report_type: str, parent=None):
         super().__init__(parent)
@@ -33,33 +77,55 @@ class ProcessingWorker(QThread):
         self._ocr_engine = OCREngine()
 
     def run(self):
-        """依次处理所有文件"""
+        """处理所有文件，合并为1份报告"""
         total = len(self.file_paths)
-        report_paths = []
+        all_fields = []
+        all_text = []
 
         for idx, file_path in enumerate(self.file_paths):
             filename = Path(file_path).name
             self.signals.file_progress.emit(idx, total, filename)
 
             try:
-                self._process_single_file(idx, file_path, total, report_paths)
+                fields, raw_text = self._process_single_file(idx, file_path, total)
+                all_fields.append(fields)
+                all_text.append(raw_text)
             except Exception as e:
-                error_msg = f'[{filename}] 处理失败: {str(e)}'
-                self.signals.log.emit('ERROR', error_msg)
+                self.signals.log.emit('ERROR', f'[{filename}] 处理失败: {str(e)}')
                 self.signals.error.emit(idx, str(e))
-                # 继续处理下一个文件，不中断整个流程
 
-        # 全部完成
-        self.signals.all_done.emit(report_paths)
-        self.signals.progress.emit(100, f'全部完成 ({len(report_paths)}/{total} 成功)')
+        # 合并所有字段和文本 → 生成1份报告
+        if all_fields:
+            self.signals.progress.emit(90, '合并数据生成最终报告...')
+            self.signals.log.emit('INFO', f'合并 {len(all_fields)} 个文件的数据...')
+
+            merged_fields = _merge_fields(all_fields)
+            merged_text = _merge_text(all_text)
+
+            # 用第一个源文件名作为报告名称
+            first_name = Path(self.file_paths[0]).stem
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            combined_name = f'{first_name}_合并报告_{timestamp}'
+
+            output_path = generate_report(
+                fields=merged_fields,
+                report_type=self.report_type,
+                source_filename=combined_name,
+                raw_text=merged_text,
+            )
+
+            self.signals.log.emit('SUCCESS',
+                f'✅ 综合报告已生成: {output_path}')
+            self.signals.progress.emit(100, f'完成 ({len(all_fields)}个文件合并)')
+            self.signals.all_done.emit(output_path, self.file_paths)
+        else:
+            self.signals.log.emit('ERROR', '没有成功处理任何文件')
 
     def _process_single_file(self, idx: int, file_path: str,
-                             total: int, report_paths: List[str]):
-        """处理单个文件"""
+                              total: int) -> tuple:
+        """处理单个文件，返回 (fields, raw_text)"""
         filename = Path(file_path).name
         file_num = idx + 1
-
-        # 当前文件的进度范围: [idx*100/total, (idx+1)*100/total)
         base_progress = int(idx * 100 / total)
 
         def emit_progress(sub_pct: int, msg: str):
@@ -67,54 +133,34 @@ class ProcessingWorker(QThread):
             self.signals.progress.emit(pct, f'[{file_num}/{total}] {msg}')
 
         # Step 1: 文件处理
-        emit_progress(0, f'分析文件: {filename}')
-        self.signals.log.emit('INFO', f'[{file_num}/{total}] 处理文件: {filename}')
+        emit_progress(0, f'分析: {filename}')
+        self.signals.log.emit('INFO', f'[{file_num}/{total}] {filename}')
 
         file_result = process_file(file_path)
-        file_type = file_result['file_type']
         image_paths = file_result['image_paths']
         raw_text = file_result['text']
 
-        self.signals.log.emit('INFO',
-            f'[{file_num}/{total}] 类型: {file_type}, 图片页数: {len(image_paths)}')
-
-        # Step 2: OCR 识别
+        # Step 2: OCR 识别（图片文件）
         ocr_items = []
         if image_paths:
-            emit_progress(30, f'OCR 识别: {filename}')
+            emit_progress(20, f'OCR: {filename}')
             ocr_items = self._ocr_engine.recognize_batch(image_paths)
             self.signals.log.emit('INFO',
-                f'[{file_num}/{total}] OCR 完成: {len(ocr_items)} 个文本块')
+                f'[{file_num}/{total}] OCR {len(ocr_items)} 项')
         elif raw_text:
             self.signals.log.emit('INFO',
-                f'[{file_num}/{total}] 使用文件自带文本 ({len(raw_text)} 字符)')
+                f'[{file_num}/{total}] 文本 {len(raw_text)} 字符')
 
         # Step 3: 字段抽取
-        emit_progress(60, f'字段抽取: {filename}')
+        emit_progress(50, f'抽取: {filename}')
         fields = extract_fields(
             self.report_type,
             ocr_items=ocr_items,
             raw_text=raw_text,
         )
         field_defs = get_field_definitions(self.report_type)
-
         hit = sum(1 for f in field_defs if fields.get(f['key'], {}).get('value', ''))
-        total_fields = len(field_defs)
         self.signals.log.emit('INFO',
-            f'[{file_num}/{total}] 字段抽取: {hit}/{total_fields} 命中')
+            f'[{file_num}/{total}] 命中 {hit}/{len(field_defs)} 字段')
 
-        self.signals.result_ready.emit(idx, fields)
-
-        # Step 4: 报告生成
-        emit_progress(80, f'生成报告: {filename}')
-        output_path = generate_report(
-            fields=fields,
-            report_type=self.report_type,
-            source_filename=file_path,
-            raw_text=raw_text,
-        )
-
-        self.signals.log.emit('SUCCESS',
-            f'[{file_num}/{total}] 报告已生成: {output_path}')
-        self.signals.report_ready.emit(idx, output_path)
-        report_paths.append(output_path)
+        return fields, raw_text

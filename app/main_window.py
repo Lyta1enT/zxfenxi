@@ -262,14 +262,12 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f'\U0001f4e6 {name}')
             self.status_list.addItem(item)
 
-        # 创建工作线程
+        # 创建工作线程（合并模式：多个文件生成1份报告）
         self._worker = ProcessingWorker(self._current_files, self._current_report_type)
 
         self._worker.signals.progress.connect(self._on_progress)
         self._worker.signals.file_progress.connect(self._on_file_progress)
         self._worker.signals.log.connect(self._on_log)
-        self._worker.signals.result_ready.connect(self._on_result)
-        self._worker.signals.report_ready.connect(self._on_report_ready)
         self._worker.signals.all_done.connect(self._on_all_done)
         self._worker.signals.error.connect(self._on_file_error)
 
@@ -294,27 +292,6 @@ class MainWindow(QMainWindow):
     def _on_log(self, level: str, message: str):
         self.log_panel.append_log(level, message)
 
-    def _on_result(self, idx: int, fields: dict):
-        """单个文件抽取结果就绪"""
-        self.preview_panel.show_fields(fields, self._current_report_type)
-
-        # 更新状态
-        if idx < self.status_list.count():
-            item = self.status_list.item(idx)
-            if item:
-                text = item.text()
-                item.setText(text.replace('\U0001f504 处理中...', '\u2705 已完成'))
-
-    def _on_report_ready(self, idx: int, file_path: str):
-        """单个文件报告生成"""
-        self._report_paths.append(file_path)
-
-        if idx < self.status_list.count():
-            item = self.status_list.item(idx)
-            if item:
-                fname = Path(file_path).name
-                item.setText(f'\u2705 报告已生成 - {fname}')
-
     def _on_file_error(self, idx: int, error_msg: str):
         """单个文件处理出错"""
         if idx < self.status_list.count():
@@ -323,24 +300,28 @@ class MainWindow(QMainWindow):
                 text = item.text()
                 item.setText(f'\u274c 处理失败')
 
-    def _on_all_done(self, report_paths: List[str]):
-        """全部处理完成"""
-        success = len(report_paths)
+    def _on_all_done(self, report_path: str, source_files: List[str]):
+        """全部处理完成，合并生成1份报告"""
+        success = len([f for f in source_files if Path(f).exists()])
         total = len(self._current_files)
         self.progress_bar.setValue(100)
-        self.progress_bar.setFormat(f'处理完成 ({success}/{total} 成功)')
+        self.progress_bar.setFormat(f'已完成 ({total}个文件合并为1份报告)')
 
         self.log_panel.append_log('SUCCESS',
-            f'批量处理完成: {success}/{total} 个文件成功生成报告')
+            f'✅ 综合报告已生成: {report_path}')
+        self.log_panel.append_log('INFO',
+            f'   源文件: {len(source_files)}个 → 1份报告')
 
-        self.statusBar().showMessage(f'批量处理完成 ({success}/{total})')
+        self.statusBar().showMessage(f'完成: {Path(report_path).name}')
         self.start_btn.setEnabled(True)
         self.reset_btn.setEnabled(True)
+        self._report_paths = [report_path]
 
-        if success > 0:
-            QMessageBox.information(self, '处理完成',
-                f'批量处理完成!\n\n成功: {success}/{total} 个文件\n\n'
-                f'报告已保存到 output/ 目录')
+        QMessageBox.information(self, '处理完成',
+            f'✅ 所有文件已合并为1份报告\n\n'
+            f'源文件: {total}个\n'
+            f'输出: {Path(report_path).name}\n\n'
+            f'已保存到 output/ 目录')
 
     def _on_open_output(self):
         output_dir = os.path.join(os.getcwd(), 'output')
