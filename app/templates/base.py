@@ -7,9 +7,25 @@ import re
 class BaseExtractor(ABC):
     """抽取规则基类，每种报告类型继承此类"""
 
+    # 报告模板说明文字（跳过这些内容）
+    BOILERPLATE_KEYWORDS = [
+        '本报告由中国人民银行', '报告说明', '征信中心', '本报告所展示',
+        '本报告中信贷交易', '本报告中借贷交易', '如无特别说明',
+        '信息主体有权', '如有异议', '第 ', '页/共', '信息主体声明',
+        '征信中心说明', '数据提供机构说明', '如信息记录斜体',
+        '本报告仅展示', '信息主体对', '报数机构',
+    ]
+
     def __init__(self):
         self.name = self.__class__.__name__
         self.fields = self._define_fields()
+
+    def filter_boilerplate(self, ocr_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """过滤掉报告模板说明文字"""
+        return [
+            item for item in ocr_items
+            if not any(kw in item['text'] for kw in self.BOILERPLATE_KEYWORDS)
+        ]
 
     @abstractmethod
     def _define_fields(self) -> List[Dict[str, Any]]:
@@ -46,14 +62,22 @@ class BaseExtractor(ABC):
     def extract_by_keywords(self, ocr_items: List[Dict[str, Any]],
                             keywords: List[str],
                             context_radius: int = 3) -> List[Dict[str, Any]]:
-        """通过关键词匹配抽取附近文本"""
+        """通过关键词匹配抽取附近文本
+
+        支持两种模式：
+        1. 同行模式: "公司名称：XX科技" → "XX科技"
+        2. 下一行模式: "公司名称" + "XX科技"（换行）→ "XX科技"
+        """
         matched = []
         for i, item in enumerate(ocr_items):
             text = item['text'].strip()
             for kw in keywords:
                 if kw in text:
                     context = text.replace(kw, '').strip().lstrip('：:，,。.、')
-                    if not context and i + 1 < len(ocr_items):
+                    # 如果本行剩余很短（像是标签），检查下一行
+                    LABEL_WORDS = {'年份', '日期', '信息', '情况', '号码',
+                                   '代码', '状态', '名称', '类型', '方式'}
+                    if (not context or context in LABEL_WORDS) and i + 1 < len(ocr_items):
                         context = ocr_items[i + 1]['text'].strip().lstrip('：:，,。.、')
                     matched.append({
                         'value': context,

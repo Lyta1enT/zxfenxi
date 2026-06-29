@@ -28,6 +28,9 @@ class LayoutAnalyzer:
     - 表格结构化识别（行、列、合并单元格）
     - 文本阅读顺序恢复
     - 多页文档处理
+
+    如果 PP-StructureV3 不可用，会抛出 ImportError，
+    调用方应捕获并降级到传统 OCR。
     """
 
     def __init__(self, lang: str = 'ch'):
@@ -35,13 +38,29 @@ class LayoutAnalyzer:
         self._table_engine = None
         self.lang = lang
         self._initialized = False
+        self._available = True
+
+    def is_available(self) -> bool:
+        """检查 PP-StructureV3 是否可用"""
+        try:
+            self._lazy_init()
+            return True
+        except (ImportError, Exception):
+            return False
 
     def _lazy_init(self):
         """延迟初始化"""
         if not self._initialized:
-            from paddleocr import PPStructureV3
-            self._engine = PPStructureV3(show_log=False, lang=self.lang)
-            self._initialized = True
+            try:
+                from paddleocr import PPStructureV3
+                self._engine = PPStructureV3(lang=self.lang)
+                self._initialized = True
+            except (ImportError, Exception) as e:
+                self._available = False
+                raise ImportError(
+                    f'PP-StructureV3 不可用: {e}\n'
+                    f'请运行: pip install "paddlex[ocr]"'
+                )
 
     def analyze(self, file_path: str) -> Dict[str, Any]:
         """分析文档，返回结构化结果
