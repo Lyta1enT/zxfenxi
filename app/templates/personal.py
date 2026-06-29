@@ -51,11 +51,12 @@ class PersonalCreditExtractor(BaseExtractor):
         )
 
         # 自动标记逾期异常
-        overdue_val = result.get('overdue_count', {}).get('value', '0')
-        nums = [c for c in str(overdue_val) if c.isdigit()]
+        overdue_val = result.get('overdue_count', {}).get('value', '')
+        import re
+        nums = re.findall(r'\d+', str(overdue_val))
         if nums and int(nums[0]) > 0:
             result['anomaly_notes'] = {
-                'value': f'\u26a0\ufe0f 存在逾期记录 ({overdue_val}个账户)',
+                'value': f'\u26a0\ufe0f 存在逾期记录 ({nums[0]}个账户)',
                 'confidence': 1.0,
                 'page': 0,
                 'note': '自动标记'

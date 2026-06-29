@@ -66,15 +66,17 @@ class BaseExtractor(ABC):
                             keywords: List[str],
                             context_radius: int = 3) -> List[Dict[str, Any]]:
         """通过关键词匹配抽取附近文本"""
+        import re
         matched = []
         for i, item in enumerate(ocr_items):
             text = item['text'].strip()
             for kw in keywords:
                 if kw in text:
-                    context = text.replace(kw, '').strip()
+                    # 去掉关键词前后的标点和空格
+                    context = text.replace(kw, '').strip().lstrip('：:，,。.、')
                     if not context and i + 1 < len(ocr_items):
-                        context = ocr_items[i + 1]['text'].strip()
-                    
+                        context = ocr_items[i + 1]['text'].strip().lstrip('：:，,。.、')
+
                     matched.append({
                         'value': context,
                         'confidence': item['confidence'],
