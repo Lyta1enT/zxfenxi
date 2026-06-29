@@ -95,280 +95,143 @@ def _fill_row(ws, row_idx: int, values: List[Any], styles, fill=None, bold=False
             cell.fill = fill
 
 
+# ===== 报告说明过滤关键词（这些行的内容不要出现在输出中）=====
+BOILERPLATE_FILTER = [
+    '本报告由中国人民银行', '报告说明', '征信中心', '本报告所展示',
+    '本报告中信贷交易', '本报告中借贷交易', '如无特别说明',
+    '信息主体有权', '如有异议', '信息主体声明',
+    '征信中心说明', '数据提供机构说明', '如信息记录斜体',
+    '本报告仅展示', '报数机构', '信用报告（自主查询版）',
+    'NO.', '报告编号', '查询机构', '中征码',
+    '第 ', '页/共', '页', '．本报告',
+    # 更多报告规则说明
+    '级分类为', '被追偿业务', '逾期总额（含欠息）',
+    '逾期天数', '各类贷款', '常见的产品种类',
+    '信贷交易包括', '借贷交易包括', '担保交易指',
+    '第三人实质上', '资产管理公司处置',
+    '透支未超过', '贷记卡账户及',
+    '信用卡、贷款和其他信贷记录',
+    '金额类数据均以人民币计算',
+    '逾期记录可能影响对您的信用评价',
+    '按时还最低还款额',
+    '请到当地信用报告查询网点',
+    '（包括商住两用）',
+    '金贷款。', '这部分包含您的',
+    '注：', '说明：',
+    # 报告规则碎片（含关键词误匹配）
+    '提供的担保服务', '保险公司提供的', '信用保证保险',
+    '分别对应其中的短期', '分，分别对应其中',
+    '五级分类为', '后三类的业务',
+    '由信贷交易所产生的债务',
+    '逾期本金是指', '除被追偿业务',
+    '分类为正常、关注和后三类',
+    # 多余标签
+    '（自主查询版）', '（人民币账户',
+    '（美元账户', '卡片尾号',
+]
+
+
+def _is_boilerplate(line: str) -> bool:
+    """判断是否为报告说明/模板文字"""
+    return any(kw in line for kw in BOILERPLATE_FILTER)
+
+
+def _classify_line(line: str) -> str:
+    """根据内容将一行文本分到对应的列
+    
+    Returns: col_name or None
+    """
+    # 列1: 公司名
+    if any(kw in line for kw in ['企业名称', '公司名称', '单位名称']):
+        return '公司高新/深房'
+    
+    # 列2: 成立/诉讼/变更/税务/处罚
+    if any(kw in line for kw in [
+        '成立', '法人', '变更', '纳税', '税务', 'A级', 'B级', 'M级',
+        '滞纳金', '处罚', '罚款', '诉讼', '法院', '行政处罚',
+        '经营异常', '违约', '欠税',
+        '注册资本', '出资', '经济类型', '企业规模', '所属行业',
+        '存续状态', '登记地址',
+    ]):
+        return '成立/诉讼/变更税等级关联风险'
+    
+    # 列3: 开票纳税
+    if any(kw in line for kw in [
+        '开票', '发票', '销售收入', '销售额', '纳税', '缴税', '税款',
+    ]):
+        return '开票纳税'
+    
+    # 列4: 企业征信/贷款信息
+    if any(kw in line for kw in [
+        '贷款', '借款', '余额', '授信', '担保', '抵押', '质押',
+        '短期', '中长期', '未结清', '已结清', '信贷',
+        '账户数', '余额', '到期', '循环', '万元',
+        '发放形式', '担保方式', '开立日期', '到期日',
+        '五级分类', '逾期总额', '逾期本金',
+        '还款', '正常类', '关注类', '不良类',
+        '授信机构', '业务种类', '借款金额',
+    ]):
+        return '企业征信'
+    
+    # 列5: 法人征信
+    if any(kw in line for kw in [
+        '姓名', '证件号码', '身份证', '性别', '出生',
+        '信用卡', '贷记卡', '负债', '逾期', '查询',
+        '还款责任', '担保责任', '共同还款',
+        '额度', '使用率', '已用额度',
+    ]):
+        return '法人征信'
+    
+    return None
+
+
 def _collect_summary_fields(report_type: str, fields: Dict[str, Any],
                             raw_text: str = '') -> Dict[str, Any]:
-    """按用户要求的格式汇总5列数据
-
-    列1: 公司高新/深房 → 企业名称
-    列2: 成立/诉讼/变更税等级关联风险 → 成立信息+法人+税务等级+处罚
-    列3: 开票纳税 → 按年开票纳税数据
-    列4: 企业征信 → 贷款明细列表
-    列5: 法人征信 → 个人负债+贷款明细+查询次数
-    """
-    result = {h: '' for h in SUMMARY_HEADERS}
-
-    if report_type == 'corporate':
-        company = _pick_first(fields, ['company_name'])
-        credit_code = _pick_first(fields, ['credit_code'])
-        establish = _pick_first(fields, ['establish_info'])
-        legal = _pick_first(fields, ['legal_person'])
-        tax_rating = _pick_first(fields, ['tax_rating'])
-        penalty = _pick_first(fields, ['penalty_info'])
-        public_info = _pick_first(fields, ['public_info'])
-
-        # 列1: 公司高新/深房
-        result['公司高新/深房'] = company
-
-        # 列2: 成立/诉讼/变更税等级关联风险
-        risk_parts = []
-        if establish:
-            risk_parts.append(establish)
-        if legal:
-            risk_parts.append(f'法人{legal}')
-        if tax_rating:
-            risk_parts.append(tax_rating)
-        if penalty:
-            risk_parts.append(penalty)
-        # 从公共信息中补充诉讼/处罚
-        for token in ['诉讼', '变更', '行政处罚', '法院', '经营异常', '违约']:
-            if token in raw_text and token not in str(risk_parts):
-                risk_parts.append(token)
-        result['成立/诉讼/变更税等级关联风险'] = '，'.join(risk_parts) if risk_parts else ''
-
-        # 列3: 开票纳税 - 按年格式化
-        invoice_raw = _pick_first(fields, ['invoice_data', 'invoice_3year'])
-        tax_raw = _pick_first(fields, ['tax_data', 'tax_revenue_3year'])
-        invoice_parts = []
-
-        # 尝试从原始文本中提取按年数据
-        import re
-        combined_text = raw_text + ' ' + invoice_raw + ' ' + tax_raw
-
-        # 优先匹配完整格式: "23年开票7709万，纳税163万"
-        full_pat = r'(?:20)?(\d{2})\s*年?\s*(?:开票|销售收入|销售额)[：:]?\s*([\d,.]+\s*万[元]?)[，,]\s*(?:纳税|缴税|税款)[：:]?\s*([\d,.]+\s*万[元]?)'
-        full_matches = re.findall(full_pat, combined_text)
-
-        year_map = {}
-        for yr, inv_amt, tax_amt in full_matches:
-            y = f'20{yr}' if len(yr) == 2 else yr
-            year_map[y] = {'invoice': inv_amt, 'tax': tax_amt}
-
-        # 补充匹配单独的开票或纳税行
-        year_pat = r'(?:20)?(\d{2})\s*年?\s*(?:开票|销售收入|销售额)[：:]?\s*([\d,.]+\s*万[元]?)'
-        tax_pat = r'(?:20)?(\d{2})\s*年?\s*(?:纳税|缴税|税款)[：:]?\s*([\d,.]+\s*万[元]?)'
-
-        for yr, amt in re.findall(year_pat, combined_text):
-            y = f'20{yr}' if len(yr) == 2 else yr
-            if y not in year_map:
-                year_map[y] = {}
-            year_map[y]['invoice'] = amt
-
-        for yr, amt in re.findall(tax_pat, combined_text):
-            y = f'20{yr}' if len(yr) == 2 else yr
-            if y not in year_map:
-                year_map[y] = {}
-            year_map[y]['tax'] = amt
-
-        if year_map:
-            for y in sorted(year_map.keys()):
-                s = f'{y[-2:]}年'
-                if 'invoice' in year_map[y]:
-                    s += f'开票{year_map[y]["invoice"]}'
-                if 'tax' in year_map[y]:
-                    s += f'，纳税{year_map[y]["tax"]}'
-                invoice_parts.append(s)
-        else:
-            # 无按年数据时，用原始文本
-            if invoice_raw:
-                invoice_parts.append(invoice_raw)
-            if tax_raw and tax_raw != invoice_raw:
-                invoice_parts.append(tax_raw)
-
-        result['开票纳税'] = ' '.join(invoice_parts) if invoice_parts else ''
-
-        # 列4: 企业征信 - 贷款明细
-        loan_raw = _pick_first(fields, ['loan_details_raw'])
-        credit_parts = []
-
-        unsettled = _pick_first(fields, ['unsettled_institutions'])
-        balance = _fmt_amount(_pick_first(fields, ['total_balance']))
-        short_term = _fmt_amount(_pick_first(fields, ['short_term_loan']))
-        medium_long = _fmt_amount(_pick_first(fields, ['medium_long_term_loan']))
-
-        if loan_raw:
-            # 分行整理贷款明细
-            loan_lines = loan_raw.replace('\\n', '\n').split('\n')
-            formatted_loans = []
-            for line in loan_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                # 去除可能已有的序号前缀
-                clean_line = re.sub(r'^\d+[.、]\s*', '', line).strip()
-                # 匹配含金额或到期信息的行
-                if any(k in clean_line for k in ['万', '元', '到期', '循环', '结清']):
-                    formatted_loans.append(clean_line)
-                elif any(k in clean_line for k in ['邮政', '信托', '台新', '和运', '中国', '工商', '交通', '微e',
-                                                       '中信', '富民', '飞泉', '三湘', '邮惠', '长安']):
-                    formatted_loans.append(clean_line)
-            # 重新编号
-            credit_parts = [f'{i+1}.{l}' for i, l in enumerate(formatted_loans)]
-
-        # 补充汇总信息
-        summary_bits = []
-        if unsettled:
-            summary_bits.append(f'未结清:{unsettled}')
-        if balance:
-            summary_bits.append(f'余额:{balance}')
-        if short_term:
-            summary_bits.append(f'短期:{short_term}')
-        if medium_long:
-            summary_bits.append(f'中长期:{medium_long}')
-        if summary_bits:
-            credit_parts.append(' | '.join(summary_bits))
-
-        result['企业征信'] = '\n'.join(credit_parts) if credit_parts else ''
-
-        # 列5: 法人征信
-        personal_parts = []
-        guarantee = _pick_first(fields, ['guarantee_info'])
-        if guarantee:
-            personal_parts.append(guarantee)
-        # 从公共信息补充
-        if public_info:
-            personal_parts.append(public_info)
-        result['法人征信'] = '；'.join(personal_parts) if personal_parts else ''
-
-        return result
-
-    if report_type == 'personal':
-        name = _pick_first(fields, ['name'])
-        id_num = _pick_first(fields, ['id_number'])
-        total_debt = _pick_first(fields, ['total_debt'])
-        credit_usage = _pick_first(fields, ['credit_card_usage'])
-        loans_raw = _pick_first(fields, ['personal_loans_raw'])
-        overdue = _pick_first(fields, ['overdue_history', 'overdue_count'])
-        repayment = _pick_first(fields, ['repayment_responsibility'])
-        query = _pick_first(fields, ['query_history'])
-
-        # 列1: 用姓名
-        result['公司高新/深房'] = name or ''
-        # 列2: 逾期/异常
-        result['成立/诉讼/变更税等级关联风险'] = overdue or ''
-        # 列3: 开票纳税（个人征信此列为空）
-        result['开票纳税'] = ''
-
-        # 列4: 企业征信 → 个人信贷汇总
-        credit_items = []
-        cc = _pick_first(fields, ['credit_card_count'])
-        lc = _pick_first(fields, ['loan_count'])
-        bal = _pick_first(fields, ['total_balance'])
-        settled = _pick_first(fields, ['settled_count'])
-        parts = []
-        if name: parts.append(f'姓名:{name}')
-        if id_num: parts.append(f'证件:{id_num}')
-        if cc: parts.append(f'信用卡:{cc}')
-        if lc: parts.append(f'贷款:{lc}')
-        if bal: parts.append(f'余额:{bal}')
-        if settled: parts.append(f'已结清:{settled}')
-        credit_items.append(' | '.join(parts))
-
-        if loans_raw:
-            loan_lines = loans_raw.split('\n')
-            for line in loan_lines[:15]:
-                ls = line.strip()
-                if ls and any(k in ls for k in ['万', '元', '到期', '循环']):
-                    credit_items.append(ls)
-
-        result['企业征信'] = '\n'.join(credit_items)
-
-        # 列5: 法人征信 → 个人负债明细
-        personal_detail = []
-        if total_debt:
-            personal_detail.append(f'总负债:{total_debt}')
-        if credit_usage:
-            personal_detail.append(f'信用卡使用率:{credit_usage}')
-        if repayment:
-            personal_detail.append(f'还款责任:{repayment}')
-        if query:
-            personal_detail.append(f'查询:{query}')
-
-        # 如果 loans_raw 还没放进企业征信，放这里
-        if not result['企业征信'] and loans_raw:
-            personal_detail.append(loans_raw[:500])
-
-        result['法人征信'] = '\n'.join(personal_detail) if personal_detail else ''
-
-        return result
-
-    if report_type == 'tax':
-        # 列3: 开票纳税
-        inv = _pick_first(fields, ['invoice_3year', 'invoice_data'])
-        tax = _pick_first(fields, ['tax_revenue_3year', 'tax_data'])
-        reg = _pick_first(fields, ['tax_registration'])
-        penalty = _pick_first(fields, ['has_penalty'])
-        arrears = _pick_first(fields, ['tax_arrears'])
-        anomaly = _pick_first(fields, ['tax_anomaly'])
-
-        # 按年格式化
-        import re
-        combined = raw_text + ' ' + inv + ' ' + tax
-
-        # 优先匹配完整格式
-        full_pat_tax = r'(?:20)?(\d{2})\s*年?\s*(?:开票|销售收入|销售额)[：:]?\s*([\d,.]+\s*万[元]?)[，,]\s*(?:纳税|缴税|税款)[：:]?\s*([\d,.]+\s*万[元]?)'
-        full_matches_tax = re.findall(full_pat_tax, combined)
-
-        year_map = {}
-        for yr, inv_amt, tax_amt in full_matches_tax:
-            y = f'20{yr}' if len(yr) == 2 else yr
-            year_map[y] = {'invoice': inv_amt, 'tax': tax_amt}
-
-        year_pat_t = r'(?:20)?(\d{2})\s*年?\s*(?:开票|销售收入|销售额)[：:]?\s*([\d,.]+\s*万[元]?)'
-        tax_pat_t = r'(?:20)?(\d{2})\s*年?\s*(?:纳税|缴税|税款)[：:]?\s*([\d,.]+\s*万[元]?)'
-
-        for yr, amt in re.findall(year_pat_t, combined):
-            y = f'20{yr}' if len(yr) == 2 else yr
-            if y not in year_map:
-                year_map[y] = {}
-            year_map[y]['invoice'] = amt
-
-        for yr, amt in re.findall(tax_pat_t, combined):
-            y = f'20{yr}' if len(yr) == 2 else yr
-            if y not in year_map:
-                year_map[y] = {}
-            year_map[y]['tax'] = amt
-
-        invoice_parts = []
-        if year_map:
-            for y in sorted(year_map.keys()):
-                s = f'{y[-2:]}年'
-                if 'invoice' in year_map[y]:
-                    s += f'开票{year_map[y]["invoice"]}'
-                if 'tax' in year_map[y]:
-                    s += f'，纳税{year_map[y]["tax"]}'
-                invoice_parts.append(s)
-        else:
-            if inv: invoice_parts.append(inv)
-            if tax and tax != inv: invoice_parts.append(tax)
-
-        result['开票纳税'] = ' '.join(invoice_parts) if invoice_parts else ''
-        # 列2: 税务异常/风险
-        risk = []
-        if reg: risk.append(reg)
-        if penalty: risk.append(penalty)
-        if arrears: risk.append(f'欠税:{arrears}')
-        if anomaly: risk.append(anomaly)
-        result['成立/诉讼/变更税等级关联风险'] = '，'.join(risk)
-        # 列4: 企业征信
-        result['企业征信'] = tax or ''
-        # 列1: 公司名
-        result['公司高新/深房'] = ''
-        # 列5: 法人征信
-        result['法人征信'] = ''
-
-        return result
-
-    return result
+    """将OCR原始文本按关键词分到5列，过滤报告说明"""
+    result = {h: [] for h in SUMMARY_HEADERS}
+    
+    # 从 raw_text 和 fields 中收集所有文本行
+    all_lines = []
+    
+    # 从 raw_text 分行
+    if raw_text:
+        for line in raw_text.replace('\\n', '\n').split('\n'):
+            line = line.strip()
+            if line:
+                all_lines.append(line)
+    
+    # 从 field values 中补充
+    if fields:
+        for key, data in fields.items():
+            val = data.get('value', '') if isinstance(data, dict) else str(data)
+            if val and val not in all_lines:
+                for line in val.replace('\\n', '\n').split('\n'):
+                    line = line.strip()
+                    if line and line not in all_lines:
+                        all_lines.append(line)
+    
+    # 过滤报告说明 + 分桶
+    for line in all_lines:
+        if _is_boilerplate(line):
+            continue
+        # 过短的碎片行（1-2个字）跳过
+        if len(line) <= 2:
+            continue
+        # 纯数字/符号行跳过
+        if line.strip().strip('-—=~').isdigit():
+            continue
+        col = _classify_line(line)
+        if col:
+            if line not in result[col]:  # 去重
+                result[col].append(line)
+    
+    # 列1特殊处理：如果有企业名称字段直接用它
+    company = _pick_first(fields, ['company_name'])
+    if company:
+        result['公司高新/深房'] = [company]
+    
+    # 将列表合并为换行分隔的文本
+    return {k: '\n'.join(v) for k, v in result.items()}
 
 
 def generate_report(fields: Dict[str, Any], report_type: str,
