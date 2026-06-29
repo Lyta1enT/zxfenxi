@@ -9,24 +9,25 @@ from app.utils.image_utils import preprocess_image, deskew_image
 
 
 class OCREngine:
-    """封装 PaddleOCR，提供统一接口"""
-    
+    """封装 PaddleOCR PP-OCRv5，提供统一接口"""
+
     def __init__(self, use_angle_cls: bool = True, lang: str = 'ch',
-                 enable_mkldnn: bool = True):
+                 ocr_version: str = 'PP-OCRv5', enable_mkldnn: bool = True):
         self._ocr = None
         self.use_angle_cls = use_angle_cls
         self.lang = lang
+        self.ocr_version = ocr_version
         self.enable_mkldnn = enable_mkldnn
         self._initialized = False
-    
+
     def _lazy_init(self):
         """延迟初始化 PaddleOCR（避免 import 耗时阻塞 UI）"""
         if not self._initialized:
             from paddleocr import PaddleOCR
             self._ocr = PaddleOCR(
-                use_angle_cls=self.use_angle_cls,
                 lang=self.lang,
-                enable_mkldnn=self.enable_mkldnn,
+                ocr_version=self.ocr_version,
+                use_angle_cls=self.use_angle_cls,
                 show_log=False,
             )
             self._initialized = True

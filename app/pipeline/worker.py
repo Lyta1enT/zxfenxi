@@ -5,8 +5,9 @@ from typing import List, Dict, Any
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from app.pipeline.file_handler import process_file
+from app.pipeline.file_handler import process_file, get_file_type
 from app.pipeline.ocr_engine import OCREngine
+from app.pipeline.layout_analyzer import LayoutAnalyzer
 from app.pipeline.field_extractor import extract_fields, get_field_definitions
 from app.pipeline.report_generator import generate_report
 
@@ -31,6 +32,12 @@ class ProcessingWorker(QThread):
         self.report_type = report_type
         self.signals = ProcessingSignals()
         self._ocr_engine = OCREngine()
+        self._layout_analyzer = None  # 延迟初始化
+
+    def _get_layout_analyzer(self):
+        if self._layout_analyzer is None:
+            self._layout_analyzer = LayoutAnalyzer()
+        return self._layout_analyzer
 
     def run(self):
         """依次处理所有文件"""
@@ -78,21 +85,43 @@ class ProcessingWorker(QThread):
         self.signals.log.emit('INFO',
             f'[{file_num}/{total}] 类型: {file_type}, 图片页数: {len(image_paths)}')
 
-        # Step 2: OCR 识别
-        emit_progress(20, f'OCR 识别: {filename}')
-
+        # Step 2: 版面分析（优先）或 OCR 识别
+        layout_result = None
         ocr_items = []
-        if image_paths:
+
+        if file_type in ('PDF', 'IMAGE'):
+            emit_progress(10, f'版面分析: {filename}')
+            try:
+                analyzer = self._get_layout_analyzer()
+                layout_result = analyzer.analyze(file_path)
+                n_tables = len(layout_result.get('tables', []))
+                n_blocks = len(layout_result.get('text_blocks', []))
+                self.signals.log.emit('INFO',
+                    f'[{file_num}/{total}] 版面分析完成: '
+                    f'{n_blocks} 文本块, {n_tables} 个表格')
+            except Exception as e:
+                self.signals.log.emit('WARN',
+                    f'[{file_num}/{total}] 版面分析失败，降级到 OCR: {e}')
+                layout_result = None
+
+        if layout_result is None and image_paths:
+            # 降级：传统 OCR
+            emit_progress(30, f'OCR 识别: {filename}')
             ocr_items = self._ocr_engine.recognize_batch(image_paths)
             self.signals.log.emit('INFO',
                 f'[{file_num}/{total}] OCR 完成: {len(ocr_items)} 个文本块')
-        elif raw_text:
+        elif raw_text and layout_result is None:
             self.signals.log.emit('INFO',
-                f'[{file_num}/{total}] 跳过 OCR (已有文本 {len(raw_text)} 字符)')
+                f'[{file_num}/{total}] 使用文件自带文本 ({len(raw_text)} 字符)')
 
-        # Step 3: 字段抽取
+        # Step 3: 字段抽取（版面感知模式优先）
         emit_progress(60, f'字段抽取: {filename}')
-        fields = extract_fields(self.report_type, ocr_items, raw_text)
+        fields = extract_fields(
+            self.report_type,
+            ocr_items=ocr_items,
+            raw_text=raw_text,
+            layout_result=layout_result,
+        )
         field_defs = get_field_definitions(self.report_type)
 
         hit = sum(1 for f in field_defs if fields.get(f['key'], {}).get('value', ''))
@@ -109,6 +138,7 @@ class ProcessingWorker(QThread):
             report_type=self.report_type,
             source_filename=file_path,
             raw_text=raw_text,
+            layout_result=layout_result,
         )
 
         self.signals.log.emit('SUCCESS',
