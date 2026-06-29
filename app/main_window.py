@@ -75,7 +75,6 @@ class MainWindow(QMainWindow):
             type_layout.addWidget(rb)
             self.radio_buttons.append(rb)
 
-        self.radio_buttons[0].setChecked(True)
         type_layout.addStretch()
         type_group.setLayout(type_layout)
         type_group.setFixedWidth(180)
@@ -205,6 +204,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_panel, 2)
 
         self.statusBar().showMessage('就绪')
+
+        # 延迟设置默认选中，确保所有组件已创建
+        self.radio_buttons[0].setChecked(True)
 
     def _on_type_changed(self):
         checked_id = self.type_group.checkedId()

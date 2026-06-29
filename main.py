@@ -2,6 +2,7 @@
 """征信报告OCR识别与生成工具 - 入口"""
 import sys
 import os
+import platform
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -18,7 +19,13 @@ def main():
 
     app = QApplication(sys.argv)
 
-    font = QFont('Microsoft YaHei', 9)
+    # macOS 用 PingFang，Windows 用 Microsoft YaHei
+    if platform.system() == 'Darwin':
+        font = QFont('PingFang SC', 9)
+    elif platform.system() == 'Windows':
+        font = QFont('Microsoft YaHei', 9)
+    else:
+        font = QFont('WenQuanYi Micro Hei', 9)
     app.setFont(font)
 
     window = MainWindow()
