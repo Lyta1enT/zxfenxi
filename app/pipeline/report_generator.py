@@ -1,15 +1,12 @@
-"""Word 报告生成器"""
+"""Excel 报表生成器"""
 import os
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from docx import Document
-from docx.shared import Inches, Pt, Cm, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
 
 
 REPORT_TYPE_NAMES = {
@@ -19,166 +16,264 @@ REPORT_TYPE_NAMES = {
 }
 
 
-def set_cell_shading(cell, color: str):
-    """设置单元格背景色"""
-    shading = OxmlElement('w:shd')
-    shading.set(qn('w:fill'), color)
-    shading.set(qn('w:val'), 'clear')
-    cell._tc.get_or_add_tcPr().append(shading)
+SUMMARY_HEADERS = [
+    '公司高新/深房',
+    '成立/诉讼/变更税等级关联风险',
+    '开票纳税',
+    '企业征信',
+    '法人征信',
+]
 
 
-def add_table_borders(table):
-    """为表格添加边框"""
-    tbl = table._tbl
-    tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
-    borders = OxmlElement('w:tblBorders')
-    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
-        element = OxmlElement(f'w:{edge}')
-        element.set(qn('w:val'), 'single')
-        element.set(qn('w:sz'), '4')
-        element.set(qn('w:space'), '0')
-        element.set(qn('w:color'), '000000')
-        borders.append(element)
-    tblPr.append(borders)
+def _text(value: Any) -> str:
+    if value is None:
+        return ''
+    return str(value).strip()
 
 
-FIELD_DEFS = {
-    'personal': [
-        ('name', '姓名'), ('id_number', '证件号码'), ('report_time', '报告时间'),
-        ('credit_card_count', '信用卡账户数'), ('loan_count', '贷款账户数'),
-        ('overdue_count', '逾期账户数'), ('total_balance', '余额'),
-        ('settled_count', '已结清账户数'),
-    ],
-    'corporate': [
-        ('company_name', '企业名称'), ('credit_code', '统一社会信用代码'),
-        ('report_time', '报告时间'), ('unsettled_institutions', '未结清机构数'),
-        ('total_balance', '余额'), ('short_term_loan', '短期借款'),
-        ('medium_long_term_loan', '中长期借款'),
-    ],
-    'tax': [
-        ('tax_registration', '纳税登记状态'), ('has_penalty', '是否有滞纳金'),
-        ('tax_arrears', '欠税金额'), ('invoice_3year', '近三年开票汇总'),
-        ('tax_revenue_3year', '近三年纳税数据'),
-    ],
-}
+def _pick_first(fields: Dict[str, Any], keys: List[str]) -> str:
+    for key in keys:
+        data = fields.get(key, {}) or {}
+        value = _text(data.get('value', ''))
+        if value and value != '[未识别]':
+            return value
+    return ''
+
+
+def _fmt_amount(value: str) -> str:
+    if not value:
+        return ''
+    return value.replace(',', '')
+
+
+def _status_from_value(value: str) -> str:
+    if not value:
+        return '未识别'
+    if any(token in value for token in ['正常', '无异常', '无']):
+        return '正常'
+    return value
+
+
+def _create_styles():
+    header_fill = PatternFill('solid', fgColor='D9EAD3')
+    sub_fill = PatternFill('solid', fgColor='EAF2E8')
+    warn_fill = PatternFill('solid', fgColor='FCE5CD')
+    bad_fill = PatternFill('solid', fgColor='F4CCCC')
+    title_font = Font(name='Microsoft YaHei', size=14, bold=True)
+    header_font = Font(name='Microsoft YaHei', size=11, bold=True, color='000000')
+    body_font = Font(name='Microsoft YaHei', size=10)
+    thin = Side(style='thin', color='000000')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+    return {
+        'header_fill': header_fill,
+        'sub_fill': sub_fill,
+        'warn_fill': warn_fill,
+        'bad_fill': bad_fill,
+        'title_font': title_font,
+        'header_font': header_font,
+        'body_font': body_font,
+        'border': border,
+        'center': center,
+        'left': left,
+    }
+
+
+def _set_table_widths(ws, widths: List[int]):
+    for idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+
+
+def _fill_row(ws, row_idx: int, values: List[Any], styles, fill=None, bold=False):
+    for col_idx, value in enumerate(values, start=1):
+        cell = ws.cell(row=row_idx, column=col_idx, value=value)
+        cell.font = styles['header_font'] if bold else styles['body_font']
+        cell.border = styles['border']
+        cell.alignment = styles['center'] if col_idx != 1 else styles['left']
+        if fill:
+            cell.fill = fill
+
+
+def _collect_summary_fields(report_type: str, fields: Dict[str, Any], raw_text: str = '') -> Dict[str, Any]:
+    result = {h: '' for h in SUMMARY_HEADERS}
+
+    if report_type == 'corporate':
+        company_name = _pick_first(fields, ['company_name'])
+        credit_code = _pick_first(fields, ['credit_code'])
+        report_time = _pick_first(fields, ['report_time'])
+        total_balance = _fmt_amount(_pick_first(fields, ['total_balance']))
+        unsettled = _pick_first(fields, ['unsettled_institutions'])
+        short_term = _fmt_amount(_pick_first(fields, ['short_term_loan']))
+        medium_long = _fmt_amount(_pick_first(fields, ['medium_long_term_loan']))
+        public_info = _pick_first(fields, ['public_info'])
+        guarantee = _pick_first(fields, ['guarantee_info'])
+
+        result['公司高新/深房'] = ''
+        risk_bits = []
+        for token in ['成立', '诉讼', '变更', '行政处罚', '法院', '经营异常', '纳税', '欠税', '税务', '违约']:
+            if token in raw_text:
+                risk_bits.append(token)
+        result['成立/诉讼/变更税等级关联风险'] = '、'.join(dict.fromkeys(risk_bits))
+        result['开票纳税'] = _pick_first(fields, ['tax_registration', 'has_penalty', 'tax_arrears', 'invoice_3year', 'tax_revenue_3year']) or (
+            '、'.join([token for token in ['开票', '纳税', '欠税'] if token in raw_text])
+        )
+        result['企业征信'] = '; '.join([x for x in [
+            f'企业名称:{company_name}' if company_name else '',
+            f'统一社会信用代码:{credit_code}' if credit_code else '',
+            f'报告时间:{report_time}' if report_time else '',
+            f'未结清机构数:{unsettled}' if unsettled else '',
+            f'余额:{total_balance}' if total_balance else '',
+            f'短期借款:{short_term}' if short_term else '',
+            f'中长期借款:{medium_long}' if medium_long else '',
+        ] if x])
+        result['法人征信'] = _pick_first(fields, ['guarantee_info', 'public_info']) or (
+            '、'.join([token for token in ['法人', '责任', '担保'] if token in raw_text])
+        )
+        return result
+
+    if report_type == 'personal':
+        result['企业征信'] = '; '.join([x for x in [
+            f'姓名:{_pick_first(fields, ["name"])}' if _pick_first(fields, ["name"]) else '',
+            f'证件号码:{_pick_first(fields, ["id_number"])}' if _pick_first(fields, ["id_number"]) else '',
+            f'报告时间:{_pick_first(fields, ["report_time"])}' if _pick_first(fields, ["report_time"]) else '',
+            f'信用卡账户数:{_pick_first(fields, ["credit_card_count"])}' if _pick_first(fields, ["credit_card_count"]) else '',
+            f'贷款账户数:{_pick_first(fields, ["loan_count"])}' if _pick_first(fields, ["loan_count"]) else '',
+            f'逾期账户数:{_pick_first(fields, ["overdue_count"])}' if _pick_first(fields, ["overdue_count"]) else '',
+            f'余额:{_pick_first(fields, ["total_balance"])}' if _pick_first(fields, ["total_balance"]) else '',
+            f'已结清账户数:{_pick_first(fields, ["settled_count"])}' if _pick_first(fields, ["settled_count"]) else '',
+        ] if x])
+        result['法人征信'] = _pick_first(fields, ['name', 'id_number'])
+        result['成立/诉讼/变更税等级关联风险'] = _pick_first(fields, ['anomaly_notes'])
+        return result
+
+    if report_type == 'tax':
+        result['开票纳税'] = '; '.join([x for x in [
+            _pick_first(fields, ['tax_registration']),
+            _pick_first(fields, ['has_penalty']),
+            _pick_first(fields, ['tax_arrears']),
+            _pick_first(fields, ['invoice_3year']),
+            _pick_first(fields, ['tax_revenue_3year']),
+        ] if x])
+        result['成立/诉讼/变更税等级关联风险'] = _pick_first(fields, ['tax_anomaly']) or (
+            '、'.join([token for token in ['纳税', '欠税', '处罚', '异常'] if token in raw_text])
+        )
+        return result
+
+    return result
 
 
 def generate_report(fields: Dict[str, Any], report_type: str,
-                    source_filename: str, output_dir: str = 'output') -> str:
-    """生成 Word 报告
-
-    Args:
-        fields: 抽取的字段字典
-        report_type: 报告类型
-        source_filename: 源文件名（用于命名输出文件）
-        output_dir: 输出目录
-
-    Returns:
-        生成的 Word 文件路径
-    """
+                    source_filename: str, output_dir: str = 'output',
+                    raw_text: str = '') -> str:
+    """生成 Excel 报表"""
     os.makedirs(output_dir, exist_ok=True)
 
     base_name = Path(source_filename).stem
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_path = os.path.join(output_dir, f'{base_name}_{report_type}_报告_{timestamp}.docx')
+    output_path = os.path.join(output_dir, f'{base_name}_{report_type}_报告_{timestamp}.xlsx')
 
-    doc = Document()
+    wb = Workbook()
+    styles = _create_styles()
 
-    # 设置默认字体
-    style = doc.styles['Normal']
-    font = style.font
-    font.name = 'SimSun'
-    font.size = Pt(10.5)
-    style.element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+    # 总表
+    ws = wb.active
+    ws.title = '总表'
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = 'A2'
+    _set_table_widths(ws, [18, 28, 22, 36, 36])
 
-    # ====== 标题 ======
-    title = doc.add_heading(REPORT_TYPE_NAMES.get(report_type, '征信报告'), level=0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    ws.merge_cells('A1:E1')
+    c = ws['A1']
+    c.value = f"{REPORT_TYPE_NAMES.get(report_type, '征信报告')} - 结构化总表"
+    c.font = styles['title_font']
+    c.alignment = styles['center']
 
-    subtitle = doc.add_paragraph()
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = subtitle.add_run(f'源文件: {source_filename}  |  生成时间: {timestamp}')
-    run.font.size = Pt(9)
-    run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    for idx, header in enumerate(SUMMARY_HEADERS, start=1):
+        cell = ws.cell(row=2, column=idx, value=header)
+        cell.font = styles['header_font']
+        cell.fill = styles['header_fill']
+        cell.border = styles['border']
+        cell.alignment = styles['center']
 
-    doc.add_paragraph()
+    summary = _collect_summary_fields(report_type, fields, raw_text)
+    row_values = [summary.get(h, '') for h in SUMMARY_HEADERS]
+    for idx, value in enumerate(row_values, start=1):
+        cell = ws.cell(row=3, column=idx, value=value or '未识别')
+        cell.font = styles['body_font']
+        cell.border = styles['border']
+        cell.alignment = styles['left'] if idx in (1, 2, 4, 5) else styles['center']
+        if not value:
+            cell.fill = styles['warn_fill']
 
-    # ====== 摘要表 ======
-    doc.add_heading('一、关键字段摘要', level=1)
+    # 字段明细
+    detail = wb.create_sheet('字段明细')
+    detail.sheet_view.showGridLines = False
+    detail.freeze_panes = 'A2'
+    detail_headers = ['字段分组', '字段键', '字段名称', '字段值', '置信度', '页码', '备注']
+    _set_table_widths(detail, [16, 18, 20, 42, 12, 10, 16])
+    for idx, header in enumerate(detail_headers, start=1):
+        cell = detail.cell(row=1, column=idx, value=header)
+        cell.font = styles['header_font']
+        cell.fill = styles['header_fill']
+        cell.border = styles['border']
+        cell.alignment = styles['center']
 
-    field_keys = [k for k, _ in FIELD_DEFS.get(report_type, [])]
-    labels = dict(FIELD_DEFS.get(report_type, []))
+    field_name_map = {
+        'personal': {
+            'name': '姓名', 'id_number': '证件号码', 'report_time': '报告时间',
+            'credit_card_count': '信用卡账户数', 'loan_count': '贷款账户数',
+            'overdue_count': '逾期账户数', 'total_balance': '余额',
+            'settled_count': '已结清账户数', 'anomaly_notes': '异常备注',
+        },
+        'corporate': {
+            'company_name': '企业名称', 'credit_code': '统一社会信用代码',
+            'report_time': '报告时间', 'unsettled_institutions': '未结清机构数',
+            'total_balance': '余额', 'short_term_loan': '短期借款',
+            'medium_long_term_loan': '中长期借款', 'guarantee_info': '担保信息',
+            'public_info': '公共信息',
+        },
+        'tax': {
+            'tax_registration': '纳税登记状态', 'has_penalty': '是否有滞纳金',
+            'tax_arrears': '欠税金额', 'invoice_3year': '近三年开票汇总',
+            'tax_revenue_3year': '近三年纳税数据', 'tax_anomaly': '税务异常说明',
+        },
+    }
 
-    table = doc.add_table(rows=len(field_keys) + 1, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    add_table_borders(table)
-
-    # 表头
-    hdr = table.rows[0]
-    for i, text in enumerate(['字段名称', '字段值']):
-        cell = hdr.cells[i]
-        cell.text = text
-        set_cell_shading(cell, 'D9E2F3')
-        for p in cell.paragraphs:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            for r in p.runs:
-                r.bold = True
-
-    # 填充数据
-    for idx, key in enumerate(field_keys):
-        row = table.rows[idx + 1]
-        row.cells[0].text = labels.get(key, key)
-
-        field_data = fields.get(key, {})
-        value = field_data.get('value', '')
-        note = field_data.get('note', '')
-
-        display_value = value if value else '[未识别]'
-        row.cells[1].text = display_value
-
-        if note == '未识别' or not value:
-            set_cell_shading(row.cells[1], 'FFF2CC')
-        elif '\u26a0\ufe0f' in str(value):
-            set_cell_shading(row.cells[1], 'FCE4EC')
-
-    doc.add_paragraph()
-
-    # ====== 异常标记 ======
-    doc.add_heading('二、异常标记', level=1)
-
-    anomalies = []
+    row = 2
+    group_label = REPORT_TYPE_NAMES.get(report_type, report_type)
     for key, data in fields.items():
-        value = data.get('value', '')
-        note = data.get('note', '')
-        label = labels.get(key, key)
+        label = field_name_map.get(report_type, {}).get(key, key)
+        value = _text(data.get('value', '')) if isinstance(data, dict) else _text(data)
+        if not value:
+            value = '未识别'
+        detail_values = [
+            group_label,
+            key,
+            label,
+            value,
+            data.get('confidence', '') if isinstance(data, dict) else '',
+            data.get('page', '') if isinstance(data, dict) else '',
+            data.get('note', '') if isinstance(data, dict) else '',
+        ]
+        for col, v in enumerate(detail_values, start=1):
+            cell = detail.cell(row=row, column=col, value=v)
+            cell.font = styles['body_font']
+            cell.border = styles['border']
+            cell.alignment = styles['left'] if col in (1, 2, 3, 4, 7) else styles['center']
+            if col == 4 and v == '未识别':
+                cell.fill = styles['warn_fill']
+        row += 1
 
-        if note == '未识别':
-            anomalies.append(f'\u26a0\ufe0f {label}: 未能识别，建议人工核查')
-        elif '\u26a0\ufe0f' in str(value):
-            anomalies.append(f'\U0001f534 {label}: {value}')
-        elif '\u8fc7\u671f' in str(value) or '\u6b20\u7a0e' in str(value) or '\u5f02\u5e38' in str(value):
-            anomalies.append(f'\U0001f7e1 {label}: {value}')
+    # 原始文本
+    raw_sheet = wb.create_sheet('原始文本')
+    raw_sheet.sheet_view.showGridLines = False
+    raw_sheet.freeze_panes = 'A1'
+    raw_sheet.column_dimensions['A'].width = 140
+    raw_cell = raw_sheet['A1']
+    raw_cell.value = raw_text or '（无原始文本）'
+    raw_cell.alignment = Alignment(wrap_text=True, vertical='top')
+    raw_cell.font = styles['body_font']
 
-    if anomalies:
-        for a in anomalies:
-            p = doc.add_paragraph(a)
-            r = p.runs[0]
-            if '\U0001f534' in a:
-                r.font.color.rgb = RGBColor(0xCC, 0x33, 0x00)
-            else:
-                r.font.color.rgb = RGBColor(0xCC, 0x88, 0x00)
-    else:
-        doc.add_paragraph('\u2705 未发现明显异常')
-
-    doc.add_paragraph()
-
-    # ====== 补充说明 ======
-    doc.add_heading('三、原始数据摘要', level=1)
-    p = doc.add_paragraph(f'本报告基于 {source_filename} 通过 OCR 识别和规则抽取生成。')
-    p.add_run('\n\n字段置信度说明：')
-    p.add_run('\n   \u2022 高置信度 (>0.9): 识别可靠')
-    p.add_run('\n   \u2022 中置信度 (0.6-0.9): 建议复核')
-    p.add_run('\n   \u2022 低置信度 (<0.6): 需人工确认')
-
-    doc.save(output_path)
+    wb.save(output_path)
     return output_path

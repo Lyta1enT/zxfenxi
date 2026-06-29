@@ -32,7 +32,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
 
     def _init_ui(self):
-        self.setWindowTitle('征信报告OCR识别与生成工具 v1.0')
+        self.setWindowTitle('征信报告OCR识别与生成工具 v1.1')
         self.setMinimumSize(960, 760)
 
         self.setStyleSheet("""

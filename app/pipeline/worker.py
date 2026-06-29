@@ -108,6 +108,7 @@ class ProcessingWorker(QThread):
             fields=fields,
             report_type=self.report_type,
             source_filename=file_path,
+            raw_text=raw_text,
         )
 
         self.signals.log.emit('SUCCESS',
