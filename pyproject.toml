@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "credit-report-ocr"
+version = "1.0.0"
+description = "征信报告OCR识别与生成工具"
+requires-python = ">=3.8"
+
+[project.scripts]
+credit-ocr = "main:main"

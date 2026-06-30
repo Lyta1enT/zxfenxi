@@ -87,7 +87,7 @@ def collect_column_data(fields, raw_text, raw_texts) -> dict:
             if m: company = m.group(1).strip(); break
     col[CLIENT_HEADERS[0]] = company + ('\n高新' if company else '')
     
-    # ===== 列2: 地址 =====
+    # ===== 列2: 地址（从企业征信PDF的"住所:"字段提取） =====
     addr = ''
     ent_text = ''
     for name, text in raw_texts.items():
@@ -95,9 +95,15 @@ def collect_column_data(fields, raw_text, raw_texts) -> dict:
             ent_text = text
             break
     if ent_text:
-        m = re.search(r'登记地址\s+(.+?)(?:信息来源|经营地址|办公|$)', ent_text, re.DOTALL)
+        # 优先找"住所:"后面的地址
+        m = re.search(r'住所[：:]?\s*([^;]+)', ent_text)
         if m:
             addr = m.group(1).strip().replace('\n', '').replace(' ', '')
+        if not addr:
+            # 回退到登记地址
+            m = re.search(r'登记地址\s+(.+?)(?:信息来源|经营地址|办公|$)', ent_text, re.DOTALL)
+            if m:
+                addr = m.group(1).strip().replace('\n', '').replace(' ', '')
     col[CLIENT_HEADERS[1]] = addr
     
     # ===== 列3: 成立/诉讼/变更税等级 =====
@@ -105,7 +111,7 @@ def collect_column_data(fields, raw_text, raw_texts) -> dict:
     for name, text in raw_texts.items():
         if '企业信用报告' in name:
             m = re.search(r'成立年份\s*(\d{4})', text)
-            if m: risk.append(f'{m.group(1)}年成立')
+            if m: risk.append(f'{m.group(1)[-2:]}年成立')
             # 法人
             m2 = re.search(r'法定代表人[^\n]*\n\s*(\S+)', text)
             if m2: risk.append('法人一年无变更')
@@ -147,9 +153,14 @@ def collect_column_data(fields, raw_text, raw_texts) -> dict:
     invoice_parts = []
     years = [2024, 2025, 2026]
     for i, yr in enumerate(years):
-        part = f'{yr}年开票{inv_totals[i]/10000:.2f}万' if i < len(inv_totals) else ''
+        yr_s = str(yr)[-2:]  # "24", "25", "26"
+        part = f'{yr_s}年开票{inv_totals[i]/10000:.2f}万' if i < len(inv_totals) else ''
         if i < len(tax_totals):
-            part += f'，纳税{tax_totals[i]/10000:.2f}万'
+            # 只有26年纳税前面加年份前缀，对标客户格式
+            if yr == 2026:
+                part += f'，{yr_s}年纳税{tax_totals[i]/10000:.2f}万'
+            else:
+                part += f'，纳税{tax_totals[i]/10000:.2f}万'
         if part:
             invoice_parts.append(part)
     col[CLIENT_HEADERS[4]] = '\n'.join(invoice_parts)
