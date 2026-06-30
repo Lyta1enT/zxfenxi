@@ -11,8 +11,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: 下载代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: 安装 Python 3.11
         uses: actions/setup-python@v5
@@ -25,10 +24,20 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: 打包成单文件EXE
+      - name: 打包成单文件EXE（含OCR全功能）
         shell: cmd
-        run: |
-          pyinstaller --clean --windowed --onefile --name "征信报告OCR工具" --hidden-import PyQt5.sip --hidden-import easyocr --hidden-import cv2 --hidden-import PIL._imaging --hidden-import openpyxl.cell._writer --hidden-import fitz --hidden-import numpy --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module IPython --exclude-module notebook main.py
+        run: >
+          pyinstaller --clean --windowed --onefile
+          --name "征信报告OCR工具"
+          --hidden-import PyQt5.sip --hidden-import easyocr
+          --hidden-import torch --hidden-import torchvision
+          --hidden-import cv2 --hidden-import PIL._imaging
+          --hidden-import openpyxl.cell._writer
+          --hidden-import fitz --hidden-import numpy
+          --exclude-module matplotlib --exclude-module scipy
+          --exclude-module pandas --exclude-module IPython
+          --exclude-module notebook
+          main.py
 
       - name: 上传打包文件
         uses: actions/upload-artifact@v4
