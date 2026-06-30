@@ -3,8 +3,8 @@ name: 打包Windows版
 on:
   push:
     tags:
-      - 'v*'             # 推送 v1.0, v2.0 等标签时自动打包
-  workflow_dispatch:      # 也可以在 GitHub 页面手动触发
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,23 +25,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: 打包成单文件EXE（带OCR全功能）
+      - name: 打包成单文件EXE
+        shell: cmd
         run: |
-          pyinstaller --clean --windowed --onefile ^
-            --name "征信报告OCR工具" ^
-            --hidden-import PyQt5.sip ^
-            --hidden-import easyocr ^
-            --hidden-import cv2 ^
-            --hidden-import PIL._imaging ^
-            --hidden-import openpyxl.cell._writer ^
-            --hidden-import fitz ^
-            --hidden-import numpy ^
-            --exclude-module matplotlib ^
-            --exclude-module scipy ^
-            --exclude-module pandas ^
-            --exclude-module IPython ^
-            --exclude-module notebook ^
-            main.py
+          pyinstaller --clean --windowed --onefile --name "征信报告OCR工具" --hidden-import PyQt5.sip --hidden-import easyocr --hidden-import cv2 --hidden-import PIL._imaging --hidden-import openpyxl.cell._writer --hidden-import fitz --hidden-import numpy --exclude-module matplotlib --exclude-module scipy --exclude-module pandas --exclude-module IPython --exclude-module notebook main.py
 
       - name: 上传打包文件
         uses: actions/upload-artifact@v4
